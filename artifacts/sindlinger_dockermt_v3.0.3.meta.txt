@@ -1,0 +1,6 @@
+image=sindlinger/dockermt:v3.0.3
+created_utc=2026-03-06T05:42:38Z
+tar_file=sindlinger_dockermt_v3.0.3.tar
+tar_sha256=3f62f6d573d0f5e25bda6ee22f5ccaea0a808aa80f4b46af264bc772c9de245b
+docker_image_id=sha256:e93cb346ee44598ff2880d9c816847dd7e1e0f7a238bf5519f4c405a73e5b972
+docker_repo_digests=sindlinger/dockermt@sha256:e93cb346ee44598ff2880d9c816847dd7e1e0f7a238bf5519f4c405a73e5b972

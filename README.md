@@ -146,6 +146,30 @@ docker compose up -d
 docker exec dockermt dockermt version
 ```
 
+## Artefato local da imagem (para backup/offline)
+Gerar `.tar` da imagem dentro do diretório do projeto:
+```bash
+cd /mnt/c/git/MT5Commander/dockermt
+./bin/export-image.sh sindlinger/dockermt:v3.0.3 artifacts
+```
+
+Arquivos gerados:
+- `artifacts/sindlinger_dockermt_v3.0.3.tar`
+- `artifacts/sindlinger_dockermt_v3.0.3.tar.sha256`
+- `artifacts/sindlinger_dockermt_v3.0.3.meta.txt`
+
+Restaurar a imagem a partir do tar:
+```bash
+docker load -i artifacts/sindlinger_dockermt_v3.0.3.tar
+```
+
+Verificar checksum:
+```bash
+sha256sum -c artifacts/sindlinger_dockermt_v3.0.3.tar.sha256
+```
+
+Se for versionar o `.tar` no Git, prefira Git LFS (arquivo grande).
+
 ## Troubleshooting
 
 ### noVNC abre, mas mostra "Falha ao conectar-se ao servidor"
