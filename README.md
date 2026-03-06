@@ -5,8 +5,8 @@ Stack full oficial para rodar MT5 + TelnetMT.
 `container-kit` foi removido. Este repositório mantém somente a versão full.
 
 ## Visão geral
-- Versão da stack: `v3.0.2`
-- Imagem: `sindlinger/dockermt:v3.0.2`
+- Versão da stack: `v3.0.3`
+- Imagem: `sindlinger/dockermt:v3.0.3`
 - Container padrão: `dockermt`
 - Caminho do projeto: `/mnt/c/git/MT5Commander/dockermt`
 
@@ -28,8 +28,8 @@ cd /mnt/c/git/MT5Commander/dockermt
 
 2. Conferir variáveis no `.env`.
 ```env
-DOCKERMT_VERSION=v3.0.2
-DOCKERMT_IMAGE=sindlinger/dockermt:v3.0.2
+DOCKERMT_VERSION=v3.0.3
+DOCKERMT_IMAGE=sindlinger/dockermt:v3.0.3
 MT5_WEB_PORT=43100
 MT5_PY_PORT=48001
 TELNETMT_PORT=41122
@@ -140,7 +140,7 @@ dockermt map
 2. Baixar imagem.
 3. Recriar stack.
 ```bash
-docker pull sindlinger/dockermt:v3.0.2
+docker pull sindlinger/dockermt:v3.0.3
 docker compose down
 docker compose up -d
 docker exec dockermt dockermt version

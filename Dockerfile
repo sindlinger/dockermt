@@ -1,7 +1,7 @@
 ARG BASE_IMAGE=sindlinger/dockermt:v3.0.0
 FROM ${BASE_IMAGE}
 
-ENV DOCKERMT_VERSION=v3.0.2
+ENV DOCKERMT_VERSION=v3.0.3
 
 # Remove old helper commands and install a single `dockermt` command.
 RUN set -eux; \
