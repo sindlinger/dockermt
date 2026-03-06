@@ -45,6 +45,10 @@ docker volume create dockermt_config
 ```bash
 docker compose up -d
 ```
+Ou usar o comando inteligente (sobe se precisar e espera ficar pronto):
+```bash
+./bin/up-dockermt.sh --sleep 10 --timeout 180
+```
 
 5. Validar que está pronto.
 ```bash
@@ -99,6 +103,15 @@ docker exec dockermt dockermt install-help
 ### Subir
 ```bash
 docker compose up -d
+```
+
+### Subir e esperar pronto (recomendado)
+```bash
+./bin/up-dockermt.sh --sleep 10 --timeout 180
+```
+Abrir navegador automaticamente:
+```bash
+./bin/up-dockermt.sh --open --sleep 10 --timeout 180
 ```
 
 ### Parar
