@@ -1,0 +1,18 @@
+services:
+  dockermt:
+    image: ${DOCKERMT_IMAGE:-sindlinger/dockermt:v3.0.1}
+    container_name: dockermt
+    volumes:
+      # Docker managed volume (recommended on Windows; avoids DrvFS bind mount issues)
+      - dockermt_config:/config
+    ports:
+      - "${MT5_WEB_PORT:-43100}:3000"
+      - "${MT5_PY_PORT:-48001}:8001"
+      - "${TELNETMT_PORT:-41122}:${TELNETMT_PORT:-41122}"
+    env_file:
+      - .env
+
+volumes:
+  dockermt_config:
+    external: true
+    name: ${DOCKERMT_CONFIG_VOLUME:-dockermt_config}
