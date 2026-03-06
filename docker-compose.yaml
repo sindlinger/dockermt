@@ -1,6 +1,6 @@
 services:
   dockermt:
-    image: ${DOCKERMT_IMAGE:-sindlinger/dockermt:v3.0.1}
+    image: ${DOCKERMT_IMAGE:-sindlinger/dockermt:v3.0.2}
     container_name: dockermt
     volumes:
       # Docker managed volume (recommended on Windows; avoids DrvFS bind mount issues)
