@@ -206,6 +206,17 @@ function runDetachedLaunch(cmd, args) {
   }
 }
 
+function runPowerShellInline(script) {
+  return runLaunch("powershell.exe", [
+    "-NoLogo",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    script
+  ]);
+}
+
 function commandExists(cmd) {
   const probe = spawnSync("bash", ["-lc", `command -v ${cmd}`], {
     stdio: "ignore",
@@ -345,14 +356,21 @@ app.on("window-all-closed", () => app.quit());
 '@;
 Set-Content -LiteralPath $tmp -Value $js -Encoding UTF8;
 $electron = $null;
+$electronExeNpm = Join-Path $env:APPDATA 'npm\\node_modules\\electron\\dist\\electron.exe';
 $cmd = Get-Command electron -ErrorAction SilentlyContinue;
 if($cmd){
   $cand = $cmd.Source;
   if($cand -and $cand.ToLower().EndsWith('.ps1')){
-    $cmdAlt = [System.IO.Path]::ChangeExtension($cand, 'cmd');
-    if(Test-Path $cmdAlt){ $cand = $cmdAlt; }
+    if(Test-Path $electronExeNpm){ $cand = $electronExeNpm; }
+    else{
+      $cmdAlt = [System.IO.Path]::ChangeExtension($cand, 'cmd');
+      if(Test-Path $cmdAlt){ $cand = $cmdAlt; }
+    }
   }
   if($cand -and (Test-Path $cand)){ $electron = $cand; }
+}
+if(-not $electron){
+  if(Test-Path $electronExeNpm){ $electron = $electronExeNpm; }
 }
 if(-not $electron){
   $cand1 = Join-Path $env:APPDATA 'npm\\electron.cmd';
@@ -363,10 +381,14 @@ if(-not $electron){
   if(Test-Path $cand2){ $electron = $cand2; }
 }
 if(-not $electron){ exit 1 }
-Start-Process -FilePath $electron -ArgumentList @($tmp, $u) | Out-Null;
+if($electron.ToLower().EndsWith('.cmd')){
+  Start-Process -WindowStyle Hidden -FilePath $electron -ArgumentList @($tmp, $u) | Out-Null;
+} else {
+  Start-Process -FilePath $electron -ArgumentList @($tmp, $u) | Out-Null;
+}
 exit 0;
 `.trim();
-  const psOk = runLaunch("powershell.exe", ["-NoProfile", "-Command", psCode]);
+  const psOk = runPowerShellInline(psCode);
   if (psOk) return true;
   // Em WSL, não usar fallback Linux com `electron` do host (gera path inválido C:\mnt\...).
   if (isWsl()) return false;
@@ -400,7 +422,7 @@ function powerShellAppLaunch(url, browserHint = "") {
     "if($resolved){ Start-Process -FilePath $resolved -ArgumentList @(\"--app=$u\"); exit 0 }",
     "else{ exit 1 }"
   ].join(" ");
-  return runLaunch("powershell.exe", ["-NoProfile", "-Command", ps]);
+  return runPowerShellInline(ps);
 }
 
 function tryOpenBrowser(url, opts = {}) {
