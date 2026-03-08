@@ -69,7 +69,8 @@ const WEB_USER = envGet("DOCKERMT_WEB_USER", envGet("CUSTOM_USER", ""));
 const WEB_PASS = envGet("DOCKERMT_WEB_PASS", envGet("PASSWORD", ""));
 const QUIET = envGet("DOCKERMT_QUIET", "0") === "1";
 const OPEN_BROWSER_DEFAULT = String(envGet("DOCKERMT_OPEN_BROWSER", "")).trim().toLowerCase();
-const OPEN_WINDOW_DEFAULT = String(envGet("DOCKERMT_OPEN_WINDOW", "1900x1200")).trim();
+const OPEN_WINDOW_DEFAULT = String(envGet("DOCKERMT_OPEN_WINDOW", "2200x1400")).trim();
+const OPEN_MAXIMIZED_DEFAULT = String(envGet("DOCKERMT_OPEN_MAXIMIZED", "1")).trim() === "1";
 const OPEN_COOLDOWN_MS = Number.parseInt(envGet("DOCKERMT_OPEN_COOLDOWN_MS", "15000"), 10);
 const NAMESPACES = new Set(["container", "docker"]);
 const REQUIRED_ENV_DEFAULTS = {
@@ -255,7 +256,7 @@ function parseOpenArgs(args) {
   let browser = "";
   let forceOpen = false;
   let windowSpecRaw = "";
-  let maximized = false;
+  let maximized = OPEN_MAXIMIZED_DEFAULT;
   for (let i = 0; i < args.length; i++) {
     const tok = String(args[i] || "").trim();
     if (!tok) continue;
@@ -312,6 +313,10 @@ function parseOpenArgs(args) {
     }
     if (tok === "--max" || tok === "--maximize" || tok === "--maximized") {
       maximized = true;
+      continue;
+    }
+    if (tok === "--no-max" || tok === "--no-maximize" || tok === "--no-maximized") {
+      maximized = false;
       continue;
     }
   }
