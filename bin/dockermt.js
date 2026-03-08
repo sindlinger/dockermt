@@ -67,6 +67,7 @@ const WEB_PORT = envGet("MT5_WEB_PORT", "43100");
 const WEB_HOST = envGet("DOCKERMT_WEB_HOST", "127.0.0.1");
 const QUIET = envGet("DOCKERMT_QUIET", "0") === "1";
 const OPEN_BROWSER_DEFAULT = String(envGet("DOCKERMT_OPEN_BROWSER", "")).trim().toLowerCase();
+const OPEN_COOLDOWN_MS = Number.parseInt(envGet("DOCKERMT_OPEN_COOLDOWN_MS", "15000"), 10);
 const NAMESPACES = new Set(["container", "docker"]);
 const REQUIRED_ENV_DEFAULTS = {
   MT5_ENABLE_PYTHON: "1",
@@ -205,9 +206,18 @@ function runDetachedLaunch(cmd, args) {
   }
 }
 
+function commandExists(cmd) {
+  const probe = spawnSync("bash", ["-lc", `command -v ${cmd}`], {
+    stdio: "ignore",
+    env: process.env
+  });
+  return probe.status === 0;
+}
+
 function parseOpenArgs(args) {
   let appMode = false;
   let browser = "";
+  let forceOpen = false;
   for (let i = 0; i < args.length; i++) {
     const tok = String(args[i] || "").trim();
     if (!tok) continue;
@@ -242,13 +252,49 @@ function parseOpenArgs(args) {
       browser = "electron";
       continue;
     }
+    if (tok === "--force-open" || tok === "--force") {
+      forceOpen = true;
+      continue;
+    }
   }
   if (!browser && OPEN_BROWSER_DEFAULT) {
     appMode = true;
     browser = OPEN_BROWSER_DEFAULT;
   }
   if (browser && !appMode) appMode = true;
-  return { appMode, browser };
+  return { appMode, browser, forceOpen };
+}
+
+function openStateFilePath() {
+  return path.join(os.homedir(), ".cache", "dockermt", "open-state.json");
+}
+
+function shouldSkipOpenLaunch(url, opts = {}) {
+  if (opts.forceOpen) return false;
+  if (!Number.isFinite(OPEN_COOLDOWN_MS) || OPEN_COOLDOWN_MS <= 0) return false;
+  const f = openStateFilePath();
+  if (!fs.existsSync(f)) return false;
+  try {
+    const raw = JSON.parse(fs.readFileSync(f, "utf8"));
+    const age = Date.now() - Number(raw.ts || 0);
+    if (!Number.isFinite(age) || age < 0) return false;
+    return age <= OPEN_COOLDOWN_MS && raw.url === url;
+  } catch {
+    return false;
+  }
+}
+
+function markOpenLaunch(url, opts = {}) {
+  const f = openStateFilePath();
+  const dir = path.dirname(f);
+  fs.mkdirSync(dir, { recursive: true });
+  const payload = {
+    ts: Date.now(),
+    url,
+    appMode: !!opts.appMode,
+    browser: String(opts.browser || "").toLowerCase()
+  };
+  fs.writeFileSync(f, JSON.stringify(payload), "utf8");
 }
 
 function writeElectronLauncherScript() {
@@ -359,49 +405,28 @@ function powerShellAppLaunch(url, browserHint = "") {
 
 function tryOpenBrowser(url, opts = {}) {
   const appMode = !!opts.appMode;
-  const browser = String(opts.browser || "").toLowerCase();
+  const browserHint = String(opts.browser || "").toLowerCase();
   if (appMode) {
-    const appAttempts = [];
-    if (browser === "electron") {
-      appAttempts.push(["_electron", []]);
-    } else if (browser === "chrome") {
-      appAttempts.push(
-        ["_ps_chrome", []],
-        ["google-chrome", [`--app=${url}`]],
-        ["chromium", [`--app=${url}`]],
-        ["chromium-browser", [`--app=${url}`]]
-      );
-    } else if (browser === "chromium") {
-      appAttempts.push(
-        ["chromium", [`--app=${url}`]],
-        ["chromium-browser", [`--app=${url}`]],
-        ["google-chrome", [`--app=${url}`]],
-        ["_ps_chrome", []]
-      );
-    } else if (browser === "edge" || browser === "msedge") {
-      appAttempts.push(["_ps_edge", []]);
-    } else if (browser === "firefox") {
-      appAttempts.push(["firefox", ["--new-window", url]]);
-    } else {
-      // Auto: Chrome/Chromium primeiro; Firefox por ultimo.
-      appAttempts.push(
-        ["_electron", []],
-        ["_ps_chrome", []],
-        ["google-chrome", [`--app=${url}`]],
-        ["chromium", [`--app=${url}`]],
-        ["chromium-browser", [`--app=${url}`]],
-        ["_ps_edge", []],
-        ["firefox", ["--new-window", url]]
-      );
+    // Regra anti-ruido: cada chamada abre no maximo UMA janela.
+    const browser = browserHint || OPEN_BROWSER_DEFAULT || "electron";
+    if (browser === "electron") return electronAppLaunch(url);
+    if (browser === "chrome") {
+      if (powerShellAppLaunch(url, "chrome")) return true;
+      if (commandExists("google-chrome")) return runLaunch("google-chrome", [`--app=${url}`]);
+      if (commandExists("chromium")) return runLaunch("chromium", [`--app=${url}`]);
+      if (commandExists("chromium-browser")) return runLaunch("chromium-browser", [`--app=${url}`]);
+      return false;
     }
-    for (const [cmd, args] of appAttempts) {
-      let ok = false;
-      if (cmd === "_electron") ok = electronAppLaunch(url);
-      else if (cmd === "_ps_chrome") ok = powerShellAppLaunch(url, "chrome");
-      else if (cmd === "_ps_edge") ok = powerShellAppLaunch(url, "edge");
-      else ok = runLaunch(cmd, args);
-      if (ok) return true;
+    if (browser === "chromium") {
+      if (commandExists("chromium")) return runLaunch("chromium", [`--app=${url}`]);
+      if (commandExists("chromium-browser")) return runLaunch("chromium-browser", [`--app=${url}`]);
+      if (powerShellAppLaunch(url, "chrome")) return true;
+      if (commandExists("google-chrome")) return runLaunch("google-chrome", [`--app=${url}`]);
+      return false;
     }
+    if (browser === "edge" || browser === "msedge") return powerShellAppLaunch(url, "edge");
+    if (browser === "firefox") return runLaunch("firefox", ["--new-window", url]);
+    return false;
   }
 
   const attempts = [
@@ -426,12 +451,18 @@ function cmdOpen(opts = {}) {
     if (!containerRunning()) composeUpDetached();
   }
   const url = noVncUrl();
+  if (shouldSkipOpenLaunch(url, opts)) {
+    process.stdout.write(url + "\n");
+    process.stderr.write("Aviso: open suprimido para evitar duplicacao de janelas (use --force-open para forcar).\n");
+    process.exit(0);
+  }
   if (appMode && browser) {
     log(`abrindo noVNC em modo app com navegador='${browser}'`);
   } else if (appMode) {
     log("abrindo noVNC em modo app (auto)");
   }
   const opened = tryOpenBrowser(url, { appMode, browser });
+  if (opened) markOpenLaunch(url, { appMode, browser });
   process.stdout.write(url + "\n");
   if (!opened) {
     process.stderr.write(
