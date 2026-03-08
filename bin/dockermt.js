@@ -69,6 +69,7 @@ const WEB_USER = envGet("DOCKERMT_WEB_USER", envGet("CUSTOM_USER", ""));
 const WEB_PASS = envGet("DOCKERMT_WEB_PASS", envGet("PASSWORD", ""));
 const QUIET = envGet("DOCKERMT_QUIET", "0") === "1";
 const OPEN_BROWSER_DEFAULT = String(envGet("DOCKERMT_OPEN_BROWSER", "")).trim().toLowerCase();
+const OPEN_WINDOW_DEFAULT = String(envGet("DOCKERMT_OPEN_WINDOW", "1900x1200")).trim();
 const OPEN_COOLDOWN_MS = Number.parseInt(envGet("DOCKERMT_OPEN_COOLDOWN_MS", "15000"), 10);
 const NAMESPACES = new Set(["container", "docker"]);
 const REQUIRED_ENV_DEFAULTS = {
@@ -253,6 +254,8 @@ function parseOpenArgs(args) {
   let appMode = false;
   let browser = "";
   let forceOpen = false;
+  let windowSpecRaw = "";
+  let maximized = false;
   for (let i = 0; i < args.length; i++) {
     const tok = String(args[i] || "").trim();
     if (!tok) continue;
@@ -291,13 +294,53 @@ function parseOpenArgs(args) {
       forceOpen = true;
       continue;
     }
+    if (tok === "--window" || tok === "--size") {
+      const next = String(args[i + 1] || "").trim();
+      if (next && !next.startsWith("--")) {
+        windowSpecRaw = next;
+        i++;
+      }
+      continue;
+    }
+    if (tok.startsWith("--window=")) {
+      windowSpecRaw = tok.slice("--window=".length).trim();
+      continue;
+    }
+    if (tok.startsWith("--size=")) {
+      windowSpecRaw = tok.slice("--size=".length).trim();
+      continue;
+    }
+    if (tok === "--max" || tok === "--maximize" || tok === "--maximized") {
+      maximized = true;
+      continue;
+    }
   }
   if (!browser && OPEN_BROWSER_DEFAULT) {
     appMode = true;
     browser = OPEN_BROWSER_DEFAULT;
   }
   if (browser && !appMode) appMode = true;
-  return { appMode, browser, forceOpen };
+  const parsed = parseWindowSpec(windowSpecRaw || OPEN_WINDOW_DEFAULT) || { width: 1900, height: 1200 };
+  return {
+    appMode,
+    browser,
+    forceOpen,
+    windowWidth: parsed.width,
+    windowHeight: parsed.height,
+    maximized
+  };
+}
+
+function parseWindowSpec(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return null;
+  const m = s.match(/^(\d{3,5})x(\d{3,5})$/);
+  if (!m) return null;
+  const width = Number.parseInt(m[1], 10);
+  const height = Number.parseInt(m[2], 10);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  if (width < 640 || height < 480) return null;
+  return { width, height };
 }
 
 function openStateFilePath() {
@@ -332,7 +375,10 @@ function markOpenLaunch(url, opts = {}) {
   fs.writeFileSync(f, JSON.stringify(payload), "utf8");
 }
 
-function writeElectronLauncherScript() {
+function writeElectronLauncherScript(opts = {}) {
+  const width = Number.isFinite(Number(opts.windowWidth)) ? Number(opts.windowWidth) : 1900;
+  const height = Number.isFinite(Number(opts.windowHeight)) ? Number(opts.windowHeight) : 1200;
+  const maximized = !!opts.maximized;
   const scriptPath = path.join(os.tmpdir(), "dockermt-novnc-electron.js");
   const code = `
 const { app, BrowserWindow } = require("electron");
@@ -351,8 +397,8 @@ app.whenReady().then(() => {
     });
   }
   const win = new BrowserWindow({
-    width: 1460,
-    height: 920,
+    width: ${Math.trunc(width)},
+    height: ${Math.trunc(height)},
     autoHideMenuBar: true,
     backgroundColor: "#111111",
     webPreferences: {
@@ -365,6 +411,7 @@ app.whenReady().then(() => {
     event.preventDefault();
     callback(user, pass);
   });
+  if (${maximized ? "true" : "false"}) win.maximize();
   win.loadURL(target);
 });
 app.on("window-all-closed", () => app.quit());
@@ -373,7 +420,10 @@ app.on("window-all-closed", () => app.quit());
   return scriptPath;
 }
 
-function electronAppLaunch(url) {
+function electronAppLaunch(url, opts = {}) {
+  const width = Number.isFinite(Number(opts.windowWidth)) ? Number(opts.windowWidth) : 1900;
+  const height = Number.isFinite(Number(opts.windowHeight)) ? Number(opts.windowHeight) : 1200;
+  const maximized = !!opts.maximized;
   // Prefer fluxo PowerShell no Windows para evitar path quebrado vindo de /tmp no WSL.
   const psCode = `
 $u='${String(url).replace(/'/g, "''")}';
@@ -397,8 +447,8 @@ app.whenReady().then(() => {
     });
   }
   const win = new BrowserWindow({
-    width: 1460,
-    height: 920,
+    width: ${Math.trunc(width)},
+    height: ${Math.trunc(height)},
     autoHideMenuBar: true,
     backgroundColor: "#111111",
     webPreferences: { contextIsolation: true, sandbox: true }
@@ -408,6 +458,7 @@ app.whenReady().then(() => {
     event.preventDefault();
     callback(user, pass);
   });
+  if (${maximized ? "true" : "false"}) win.maximize();
   win.loadURL(target);
 });
 app.on("window-all-closed", () => app.quit());
@@ -451,7 +502,7 @@ exit 0;
   // Em WSL, não usar fallback Linux com `electron` do host (gera path inválido C:\mnt\...).
   if (isWsl()) return false;
   // Fallback: Linux electron nativo (quando existir).
-  const launcher = writeElectronLauncherScript();
+  const launcher = writeElectronLauncherScript(opts);
   return runDetachedLaunch("electron", [launcher, url, WEB_USER, WEB_PASS]);
 }
 
@@ -489,7 +540,7 @@ function tryOpenBrowser(url, opts = {}) {
   if (appMode) {
     // Regra anti-ruido: cada chamada abre no maximo UMA janela.
     const browser = browserHint || OPEN_BROWSER_DEFAULT || "electron";
-    if (browser === "electron") return electronAppLaunch(url);
+    if (browser === "electron") return electronAppLaunch(url, opts);
     if (browser === "chrome") {
       if (powerShellAppLaunch(url, "chrome")) return true;
       if (commandExists("google-chrome")) return runLaunch("google-chrome", [`--app=${url}`]);
@@ -541,8 +592,8 @@ function cmdOpen(opts = {}) {
   } else if (appMode) {
     log("abrindo noVNC em modo app (auto)");
   }
-  const opened = tryOpenBrowser(url, { appMode, browser });
-  if (opened) markOpenLaunch(url, { appMode, browser });
+  const opened = tryOpenBrowser(url, opts);
+  if (opened) markOpenLaunch(url, opts);
   process.stdout.write(redactSecrets(url) + "\n");
   if (!opened) {
     process.stderr.write(
@@ -569,6 +620,8 @@ function help() {
       "  dockermt open                  # sobe stack (se precisar) e abre noVNC",
       "  dockermt open --app [browser]  # app mode (electron|chrome|chromium|edge|firefox)",
       "  dockermt open --electron       # abre em janela Electron",
+      "  dockermt open --window WxH     # tamanho da janela app (ex: 2200x1400)",
+      "  dockermt open --maximized      # abre janela maximizada",
       "  dockermt open --browser chrome # equivalente ao app mode",
       "  dockermt monitor               # alias de 'open'",
       "  dockermt container open        # sobe stack + abre noVNC",
