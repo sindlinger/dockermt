@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec node /mnt/c/git/MT5Commander/dockermt/bin/dockermt.js "$@"

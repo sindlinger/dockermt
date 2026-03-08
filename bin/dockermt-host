@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ENV_FILE="${ROOT_DIR}/.env"
+
+is_inside_container() {
+  [ -f "/.dockerenv" ] && return 0
+  grep -qaE '(docker|containerd|kubepods)' /proc/1/cgroup 2>/dev/null
+}
+
+handoff_to_container_cli_if_needed() {
+  # Se este wrapper for executado de dentro de um container, delega
+  # para o dockermt local do container para evitar recursion/docker exec.
+  is_inside_container || return 0
+  local self_path local_path
+  self_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+  local_path="$(readlink -f /usr/local/bin/dockermt 2>/dev/null || true)"
+  if [ -n "$local_path" ] && [ "$local_path" != "$self_path" ] && [ -x /usr/local/bin/dockermt ]; then
+    exec /usr/local/bin/dockermt "$@"
+  fi
+}
+
+handoff_to_container_cli_if_needed "$@"
+
+get_env() {
+  local key="$1" def="${2:-}"
+  if [ -f "$ENV_FILE" ]; then
+    local v
+    v="$(awk -F= -v k="$key" '$1==k{print $2}' "$ENV_FILE" | tail -n 1 | tr -d '\r')"
+    [ -n "$v" ] && { echo "$v"; return 0; }
+  fi
+  echo "$def"
+}
+
+need_docker() {
+  command -v docker >/dev/null 2>&1 || { echo "Erro: docker nao encontrado no PATH." >&2; exit 1; }
+  docker info >/dev/null 2>&1 || { echo "Erro: Docker daemon indisponivel." >&2; exit 1; }
+  docker compose version >/dev/null 2>&1 || { echo "Erro: docker compose indisponivel." >&2; exit 1; }
+}
+
+container_name() { echo "${DOCKERMT_CONTAINER_NAME:-$(get_env DOCKERMT_CONTAINER_NAME dockermt)}"; }
+image_ref() { echo "$(get_env DOCKERMT_IMAGE sindlinger/dockermt:v3.0.7-local)"; }
+web_port() { echo "$(get_env MT5_WEB_PORT 43100)"; }
+py_port() { echo "$(get_env MT5_PY_PORT 48001)"; }
+telnet_port() { echo "$(get_env TELNETMT_PORT 41122)"; }
+config_volume() { echo "$(get_env DOCKERMT_CONFIG_VOLUME dockermt_config)"; }
+
+is_running() {
+  local cname
+  cname="$(container_name)"
+  [ "$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null || true)" = "true" ]
+}
+
+resolve_running_container() {
+  local preferred found
+  preferred="$(container_name)"
+
+  # 1) Preferred name from env/.env.
+  if docker ps --format '{{.Names}}' | grep -qx "$preferred"; then
+    echo "$preferred"
+    return 0
+  fi
+
+  # 2) Compose service label (most reliable when name drift exists).
+  found="$(docker ps --filter "label=com.docker.compose.service=dockermt" --format '{{.Names}}' | head -n 1 || true)"
+  if [ -n "$found" ]; then
+    echo "$found"
+    return 0
+  fi
+
+  # 3) Canonical fallback name.
+  if docker ps --format '{{.Names}}' | grep -qx 'dockermt'; then
+    echo "dockermt"
+    return 0
+  fi
+
+  # 4) Last resort: keep preferred for clearer error message.
+  echo "$preferred"
+  return 0
+}
+
+host_help() {
+  cat <<'H'
+dockermt (unificado)
+
+Uso:
+  dockermt install [--build] [--sleep N] [--timeout N] [--open]
+  dockermt uninstall [--purge-volume] [--remove-image]
+  dockermt status
+  dockermt logs [-n N] [-f]
+  dockermt build [--tag IMAGE:TAG]
+  dockermt map-host
+  dockermt help-host
+
+Modo CLI FULL:
+  dockermt [qualquer_comando_do_cli_full]
+  dockermt                 # abre prompt mt>
+
+Compat legado:
+  dockermt cmdmtc '1|PING'
+  dockermt cmdmt-map
+  dockermt cmdmt-bootstrap
+H
+}
+
+host_map() {
+  cat <<EOF2
+DOCKERMT Host Map
+=================
+project_dir : $ROOT_DIR
+env_file    : $ENV_FILE
+container   : $(container_name)
+image       : $(image_ref)
+volume      : $(config_volume)
+ports       : web=$(web_port), py=$(py_port), telnet=$(telnet_port)
+noVNC       : http://127.0.0.1:$(web_port)/vnc/index.html?autoconnect=1&resize=remote&host=127.0.0.1&port=$(web_port)&path=websockify&clipboard_up=true&clipboard_down=true&clipboard_seamless=true&show_control_bar=true
+EOF2
+}
+
+wait_ready() {
+  local timeout_sec="$1" initial_sleep="$2"
+  local health_url="http://127.0.0.1:$(web_port)/vnc/index.html"
+  sleep "$initial_sleep"
+  local start now elapsed code
+  start="$(date +%s)"
+  while true; do
+    if is_running; then
+      if command -v curl >/dev/null 2>&1; then
+        code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "$health_url" || true)"
+        if [ "$code" = "200" ] || [ "$code" = "401" ] || [ "$code" = "403" ] || [[ "$code" == 3* ]]; then
+          return 0
+        fi
+      else
+        return 0
+      fi
+    fi
+    now="$(date +%s)"; elapsed="$((now-start))"
+    [ "$elapsed" -ge "$timeout_sec" ] && return 1
+    sleep 2
+  done
+}
+
+host_install() {
+  need_docker
+  local do_build=0 open_browser=0 timeout_sec="${DOCKERMT_WAIT_TIMEOUT:-180}" initial_sleep="${DOCKERMT_INITIAL_SLEEP:-5}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --build) do_build=1; shift ;;
+      --open) open_browser=1; shift ;;
+      --timeout) timeout_sec="${2:-180}"; shift 2 ;;
+      --sleep) initial_sleep="${2:-5}"; shift 2 ;;
+      *) echo "Parametro invalido para install: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  docker volume inspect "$(config_volume)" >/dev/null 2>&1 || docker volume create "$(config_volume)" >/dev/null
+  if ! is_running; then
+    if [ "$do_build" -eq 1 ]; then
+      (cd "$ROOT_DIR" && docker compose up -d --build)
+    else
+      (cd "$ROOT_DIR" && docker compose up -d)
+    fi
+  fi
+  if ! wait_ready "$timeout_sec" "$initial_sleep"; then
+    echo "Erro: timeout aguardando readiness." >&2
+    (cd "$ROOT_DIR" && docker compose ps -a) || true
+    exit 1
+  fi
+  echo "OK: install concluido."
+  host_map
+  if [ "$open_browser" -eq 1 ] && command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "http://127.0.0.1:$(web_port)/vnc/index.html?autoconnect=1&resize=remote&host=127.0.0.1&port=$(web_port)&path=websockify&clipboard_up=true&clipboard_down=true&clipboard_seamless=true&show_control_bar=true" >/dev/null 2>&1 || true
+  fi
+}
+
+host_uninstall() {
+  need_docker
+  local purge_volume=0 remove_image=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --purge-volume) purge_volume=1; shift ;;
+      --remove-image) remove_image=1; shift ;;
+      *) echo "Parametro invalido para uninstall: $1" >&2; exit 1 ;;
+    esac
+  done
+  (cd "$ROOT_DIR" && docker compose down --remove-orphans)
+  [ "$purge_volume" -eq 1 ] && docker volume rm "$(config_volume)" >/dev/null 2>&1 || true
+  [ "$remove_image" -eq 1 ] && docker image rm "$(image_ref)" >/dev/null 2>&1 || true
+  echo "OK: uninstall concluido."
+}
+
+host_status() { need_docker; (cd "$ROOT_DIR" && docker compose ps -a); }
+host_logs() {
+  need_docker
+  local follow=0 n=200
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--follow) follow=1; shift ;;
+      -n|--tail) n="${2:-200}"; shift 2 ;;
+      *) echo "Parametro invalido para logs: $1" >&2; exit 1 ;;
+    esac
+  done
+  if [ "$follow" -eq 1 ]; then (cd "$ROOT_DIR" && docker compose logs --tail "$n" -f); else (cd "$ROOT_DIR" && docker compose logs --tail "$n"); fi
+}
+host_build() {
+  need_docker
+  local tag=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tag) tag="${2:-}"; shift 2 ;;
+      *) echo "Parametro invalido para build: $1" >&2; exit 1 ;;
+    esac
+  done
+  [ -z "$tag" ] && tag="$(image_ref)"
+  (cd "$ROOT_DIR" && docker build -t "$tag" .)
+  echo "OK: build concluido ($tag)"
+}
+
+exec_full() {
+  local cname preferred
+  preferred="$(container_name)"
+  cname="$(resolve_running_container)"
+  docker ps --format '{{.Names}}' | grep -qx "$cname" || {
+    echo "Erro: No such container: $preferred" >&2
+    echo "Dica: execute 'dockermt install' ou ajuste DOCKERMT_CONTAINER_NAME." >&2
+    exit 1
+  }
+  if [ -t 0 ] && [ -t 1 ]; then exec docker exec -it "$cname" dockermt "$@"; else exec docker exec -i "$cname" dockermt "$@"; fi
+}
+
+sub="${1:-}"
+case "$sub" in
+  install) shift; host_install "$@" ;;
+  uninstall) shift; host_uninstall "$@" ;;
+  status) shift; host_status "$@" ;;
+  logs) shift; host_logs "$@" ;;
+  build) shift; host_build "$@" ;;
+  map-host) shift; host_map "$@" ;;
+  help-host) shift; host_help ;;
+  cmdmtc) shift; exec_full send "$*" ;;
+  cmdmt-map) shift; exec_full map ;;
+  cmdmt-bootstrap) shift; exec_full install-help ;;
+  *) exec_full "$@" ;;
+esac
