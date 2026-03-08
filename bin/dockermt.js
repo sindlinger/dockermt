@@ -115,6 +115,16 @@ function isInsideContainer() {
   }
 }
 
+function isWsl() {
+  if (process.platform !== "linux") return false;
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
+  try {
+    return /microsoft/i.test(fs.readFileSync("/proc/version", "utf8"));
+  } catch {
+    return false;
+  }
+}
+
 function dockerCompose(args) {
   run("docker", ["compose", "-f", composeFile(), ...args]);
 }
@@ -267,6 +277,54 @@ app.on("window-all-closed", () => app.quit());
 }
 
 function electronAppLaunch(url) {
+  // Prefer fluxo PowerShell no Windows para evitar path quebrado vindo de /tmp no WSL.
+  const psCode = `
+$u='${String(url).replace(/'/g, "''")}';
+$tmp = Join-Path $env:TEMP 'dockermt-novnc-electron.js';
+$js = @'
+const { app, BrowserWindow } = require("electron");
+const target = process.argv[2];
+if (!target) process.exit(2);
+app.whenReady().then(() => {
+  const win = new BrowserWindow({
+    width: 1460,
+    height: 920,
+    autoHideMenuBar: true,
+    backgroundColor: "#111111",
+    webPreferences: { contextIsolation: true, sandbox: true }
+  });
+  win.loadURL(target);
+});
+app.on("window-all-closed", () => app.quit());
+'@;
+Set-Content -LiteralPath $tmp -Value $js -Encoding UTF8;
+$electron = $null;
+$cmd = Get-Command electron -ErrorAction SilentlyContinue;
+if($cmd){
+  $cand = $cmd.Source;
+  if($cand -and $cand.ToLower().EndsWith('.ps1')){
+    $cmdAlt = [System.IO.Path]::ChangeExtension($cand, 'cmd');
+    if(Test-Path $cmdAlt){ $cand = $cmdAlt; }
+  }
+  if($cand -and (Test-Path $cand)){ $electron = $cand; }
+}
+if(-not $electron){
+  $cand1 = Join-Path $env:APPDATA 'npm\\electron.cmd';
+  if(Test-Path $cand1){ $electron = $cand1; }
+}
+if(-not $electron){
+  $cand2 = Join-Path $env:LOCALAPPDATA 'Programs\\electron\\electron.exe';
+  if(Test-Path $cand2){ $electron = $cand2; }
+}
+if(-not $electron){ exit 1 }
+Start-Process -FilePath $electron -ArgumentList @($tmp, $u) | Out-Null;
+exit 0;
+`.trim();
+  const psOk = runLaunch("powershell.exe", ["-NoProfile", "-Command", psCode]);
+  if (psOk) return true;
+  // Em WSL, não usar fallback Linux com `electron` do host (gera path inválido C:\mnt\...).
+  if (isWsl()) return false;
+  // Fallback: Linux electron nativo (quando existir).
   const launcher = writeElectronLauncherScript();
   return runDetachedLaunch("electron", [launcher, url]);
 }
@@ -286,10 +344,14 @@ function powerShellAppLaunch(url, browserHint = "") {
       ];
   const ps = [
     "$u='" + String(url).replace(/'/g, "''") + "';",
-    "$c=@(" + candidates.map((c) => `'${c.replace(/'/g, "''")}'`).join(",") + ") | ",
-    "ForEach-Object { (Get-Command $_ -ErrorAction SilentlyContinue).Source ?? $_ } | ",
-    "Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1;",
-    "if($c){ Start-Process -FilePath $c -ArgumentList \"--app=$u\"; exit 0 }",
+    "$raw=@(" + candidates.map((c) => `'${c.replace(/'/g, "''")}'`).join(",") + ");",
+    "$resolved=$null;",
+    "foreach($item in $raw){",
+    "  $cmd = Get-Command $item -ErrorAction SilentlyContinue;",
+    "  if($cmd){ $cand = $cmd.Source } else { $cand = $item }",
+    "  if($cand -and (Test-Path $cand)){ $resolved = $cand; break }",
+    "}",
+    "if($resolved){ Start-Process -FilePath $resolved -ArgumentList @(\"--app=$u\"); exit 0 }",
     "else{ exit 1 }"
   ].join(" ");
   return runLaunch("powershell.exe", ["-NoProfile", "-Command", ps]);
