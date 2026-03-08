@@ -65,6 +65,8 @@ const envGet = (k, d) => process.env[k] || fileEnv[k] || d;
 const CONTAINER_NAME = envGet("DOCKERMT_CONTAINER_NAME", "dockermt");
 const WEB_PORT = envGet("MT5_WEB_PORT", "43100");
 const WEB_HOST = envGet("DOCKERMT_WEB_HOST", "127.0.0.1");
+const WEB_USER = envGet("DOCKERMT_WEB_USER", envGet("CUSTOM_USER", ""));
+const WEB_PASS = envGet("DOCKERMT_WEB_PASS", envGet("PASSWORD", ""));
 const QUIET = envGet("DOCKERMT_QUIET", "0") === "1";
 const OPEN_BROWSER_DEFAULT = String(envGet("DOCKERMT_OPEN_BROWSER", "")).trim().toLowerCase();
 const OPEN_COOLDOWN_MS = Number.parseInt(envGet("DOCKERMT_OPEN_COOLDOWN_MS", "15000"), 10);
@@ -178,7 +180,24 @@ function ensureContainerUpForExec() {
 }
 
 function noVncUrl() {
-  return `http://${WEB_HOST}:${WEB_PORT}/vnc/index.html?autoconnect=1&resize=remote&host=${WEB_HOST}&port=${WEB_PORT}&path=websockify&clipboard_up=true&clipboard_down=true&clipboard_seamless=true&show_control_bar=true`;
+  const qs = new URLSearchParams({
+    autoconnect: "1",
+    resize: "remote",
+    host: WEB_HOST,
+    port: WEB_PORT,
+    path: "websockify",
+    clipboard_up: "true",
+    clipboard_down: "true",
+    clipboard_seamless: "true",
+    show_control_bar: "true"
+  });
+  if (WEB_USER) qs.set("username", WEB_USER);
+  if (WEB_PASS) qs.set("password", WEB_PASS);
+  return `http://${WEB_HOST}:${WEB_PORT}/vnc/index.html?${qs.toString()}`;
+}
+
+function redactSecrets(url) {
+  return String(url || "").replace(/([?&]password=)[^&]*/gi, "$1***");
 }
 
 function runLaunch(cmd, args) {
@@ -485,7 +504,7 @@ function cmdOpen(opts = {}) {
   }
   const opened = tryOpenBrowser(url, { appMode, browser });
   if (opened) markOpenLaunch(url, { appMode, browser });
-  process.stdout.write(url + "\n");
+  process.stdout.write(redactSecrets(url) + "\n");
   if (!opened) {
     process.stderr.write(
       appMode
@@ -521,7 +540,7 @@ function help() {
       "",
       `Container: ${CONTAINER_NAME}`,
       `Projeto:   ${ROOT_DIR}`,
-      `noVNC:     ${noVncUrl()}`
+      `noVNC:     ${redactSecrets(noVncUrl())}`
     ].join("\n") + "\n"
   );
 }
@@ -536,7 +555,7 @@ function mapHost() {
       `container   : ${CONTAINER_NAME}`,
       `web_host    : ${WEB_HOST}`,
       `ports       : web=${WEB_PORT}, py=${envGet("MT5_PY_PORT", "48001")}, telnet=${envGet("TELNETMT_PORT", "41122")}`,
-      `noVNC       : ${noVncUrl()}`
+      `noVNC       : ${redactSecrets(noVncUrl())}`
     ].join("\n") + "\n"
   );
 }
