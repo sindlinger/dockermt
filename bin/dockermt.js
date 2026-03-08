@@ -168,35 +168,117 @@ function noVncUrl() {
   return `http://${WEB_HOST}:${WEB_PORT}/vnc/index.html?autoconnect=1&resize=remote&host=${WEB_HOST}&port=${WEB_PORT}&path=websockify&clipboard_up=true&clipboard_down=true&clipboard_seamless=true&show_control_bar=true`;
 }
 
-function tryOpenBrowser(url, appMode = false) {
-  if (appMode) {
-    const firefoxApp = spawnSync("firefox", ["--new-window", url], { stdio: "ignore", env: process.env });
-    if (firefoxApp.status === 0) return true;
+function runLaunch(cmd, args) {
+  const r = spawnSync(cmd, args, {
+    stdio: "ignore",
+    env: process.env,
+    timeout: 8000,
+    windowsHide: true
+  });
+  return r && r.status === 0;
+}
 
-    const appAttempts = [
-      [
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-Command",
-          [
-            "$u='" + String(url).replace(/'/g, "''") + "';",
-            "$c=@((Get-Command chrome.exe -ErrorAction SilentlyContinue).Source,",
-            "'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',",
-            "'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe') | ",
-            "Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1;",
-            "if($c){ Start-Process -FilePath $c -ArgumentList \"--app=$u\"; exit 0 }",
-            "else{ exit 1 }"
-          ].join(" ")
-        ]
-      ],
-      ["google-chrome", [`--app=${url}`]],
-      ["chromium", [`--app=${url}`]],
-      ["chromium-browser", [`--app=${url}`]]
-    ];
+function parseOpenArgs(args) {
+  let appMode = false;
+  let browser = "";
+  for (let i = 0; i < args.length; i++) {
+    const tok = String(args[i] || "").trim();
+    if (!tok) continue;
+    if (tok === "--app") {
+      appMode = true;
+      const next = String(args[i + 1] || "").trim();
+      if (next && !next.startsWith("--")) {
+        browser = next.toLowerCase();
+        i++;
+      }
+      continue;
+    }
+    if (tok.startsWith("--app=")) {
+      appMode = true;
+      browser = tok.slice("--app=".length).trim().toLowerCase();
+      continue;
+    }
+    if (tok === "--browser") {
+      const next = String(args[i + 1] || "").trim();
+      if (next) {
+        browser = next.toLowerCase();
+        i++;
+      }
+      continue;
+    }
+    if (tok.startsWith("--browser=")) {
+      browser = tok.slice("--browser=".length).trim().toLowerCase();
+      continue;
+    }
+  }
+  if (browser && !appMode) appMode = true;
+  return { appMode, browser };
+}
+
+function powerShellAppLaunch(url, browserHint = "") {
+  const b = String(browserHint || "").toLowerCase();
+  const candidates = b === "edge" || b === "msedge"
+    ? [
+        "msedge.exe",
+        "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+        "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+      ]
+    : [
+        "chrome.exe",
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+      ];
+  const ps = [
+    "$u='" + String(url).replace(/'/g, "''") + "';",
+    "$c=@(" + candidates.map((c) => `'${c.replace(/'/g, "''")}'`).join(",") + ") | ",
+    "ForEach-Object { (Get-Command $_ -ErrorAction SilentlyContinue).Source ?? $_ } | ",
+    "Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1;",
+    "if($c){ Start-Process -FilePath $c -ArgumentList \"--app=$u\"; exit 0 }",
+    "else{ exit 1 }"
+  ].join(" ");
+  return runLaunch("powershell.exe", ["-NoProfile", "-Command", ps]);
+}
+
+function tryOpenBrowser(url, opts = {}) {
+  const appMode = !!opts.appMode;
+  const browser = String(opts.browser || "").toLowerCase();
+  if (appMode) {
+    const appAttempts = [];
+    if (browser === "chrome") {
+      appAttempts.push(
+        ["_ps_chrome", []],
+        ["google-chrome", [`--app=${url}`]],
+        ["chromium", [`--app=${url}`]],
+        ["chromium-browser", [`--app=${url}`]]
+      );
+    } else if (browser === "chromium") {
+      appAttempts.push(
+        ["chromium", [`--app=${url}`]],
+        ["chromium-browser", [`--app=${url}`]],
+        ["google-chrome", [`--app=${url}`]],
+        ["_ps_chrome", []]
+      );
+    } else if (browser === "edge" || browser === "msedge") {
+      appAttempts.push(["_ps_edge", []]);
+    } else if (browser === "firefox") {
+      appAttempts.push(["firefox", ["--new-window", url]]);
+    } else {
+      // Auto: Chrome/Chromium primeiro; Firefox por ultimo.
+      appAttempts.push(
+        ["_ps_chrome", []],
+        ["google-chrome", [`--app=${url}`]],
+        ["chromium", [`--app=${url}`]],
+        ["chromium-browser", [`--app=${url}`]],
+        ["_ps_edge", []],
+        ["firefox", ["--new-window", url]]
+      );
+    }
     for (const [cmd, args] of appAttempts) {
-      const r = spawnSync(cmd, args, { stdio: "ignore", env: process.env });
-      if (r.status === 0) return true;
+      let ok = false;
+      if (cmd === "_ps_chrome") ok = powerShellAppLaunch(url, "chrome");
+      else if (cmd === "_ps_edge") ok = powerShellAppLaunch(url, "edge");
+      else ok = runLaunch(cmd, args);
+      if (ok) return true;
     }
   }
 
@@ -208,25 +290,31 @@ function tryOpenBrowser(url, appMode = false) {
     ["powershell.exe", ["-NoProfile", "-Command", `Start-Process '${url}'`]]
   ];
   for (const [cmd, args] of attempts) {
-    const r = spawnSync(cmd, args, { stdio: "ignore", env: process.env });
-    if (r.status === 0) return true;
+    if (runLaunch(cmd, args)) return true;
   }
   return false;
 }
 
-function cmdOpen(appMode = false) {
+function cmdOpen(opts = {}) {
+  const appMode = !!opts.appMode;
+  const browser = String(opts.browser || "").toLowerCase();
   ensureEnvDefaults();
   if (!isInsideContainer()) {
     ensureDocker();
     if (!containerRunning()) composeUpDetached();
   }
   const url = noVncUrl();
-  const opened = tryOpenBrowser(url, appMode);
+  if (appMode && browser) {
+    log(`abrindo noVNC em modo app com navegador='${browser}'`);
+  } else if (appMode) {
+    log("abrindo noVNC em modo app (auto)");
+  }
+  const opened = tryOpenBrowser(url, { appMode, browser });
   process.stdout.write(url + "\n");
   if (!opened) {
     process.stderr.write(
       appMode
-        ? "Aviso: não consegui abrir em modo app automaticamente.\n"
+        ? `Aviso: não consegui abrir em modo app${browser ? ` (browser=${browser})` : ""} automaticamente.\n`
         : "Aviso: não consegui abrir o navegador automaticamente.\n"
     );
   }
@@ -246,10 +334,11 @@ function help() {
       "  dockermt status|ps             # docker compose ps",
       "  dockermt logs [args...]        # docker compose logs ...",
       "  dockermt open                  # sobe stack (se precisar) e abre noVNC",
-      "  dockermt open --app            # abre noVNC em janela app (chrome/chromium)",
+      "  dockermt open --app [browser]  # app mode (chrome|chromium|edge|firefox)",
+      "  dockermt open --browser chrome # equivalente ao app mode",
       "  dockermt monitor               # alias de 'open'",
       "  dockermt container open        # sobe stack + abre noVNC",
-      "  dockermt container open --app  # idem em modo app",
+      "  dockermt container open --app [browser]",
       "  dockermt container monitor     # alias de 'container open'",
       "  dockermt map-host              # mostra mapa host",
       "  dockermt [comando_cli]         # proxy para /usr/local/bin/dockermt no container",
@@ -355,7 +444,7 @@ try {
   }
 
   if (cmd === "open" || cmd === "monitor") {
-    cmdOpen(rest.includes("--app"));
+    cmdOpen(parseOpenArgs(rest));
   }
 
   if (cmd === "doctor") {
@@ -397,7 +486,7 @@ try {
         const st = runNoExit("docker", ["compose", "-f", composeFile(), "up", "-d"]);
         if (st !== 0) process.exit(st);
       }
-      cmdOpen(nsArgs.includes("--app"));
+      cmdOpen(parseOpenArgs(nsArgs));
     }
 
     if (["install", "up", "start", "uninstall", "down", "stop", "status", "ps", "logs", "doctor", "reinstall", "repair"].includes(nsCmd)) {
