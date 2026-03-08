@@ -193,11 +193,16 @@ function noVncUrl() {
   });
   if (WEB_USER) qs.set("username", WEB_USER);
   if (WEB_PASS) qs.set("password", WEB_PASS);
-  return `http://${WEB_HOST}:${WEB_PORT}/vnc/index.html?${qs.toString()}`;
+  const authPrefix = WEB_USER
+    ? `${encodeURIComponent(WEB_USER)}:${encodeURIComponent(WEB_PASS || "")}@`
+    : "";
+  return `http://${authPrefix}${WEB_HOST}:${WEB_PORT}/vnc/index.html?${qs.toString()}`;
 }
 
 function redactSecrets(url) {
-  return String(url || "").replace(/([?&]password=)[^&]*/gi, "$1***");
+  return String(url || "")
+    .replace(/\/\/([^:@\/?#]+):([^@\/?#]*)@/g, "//$1:***@")
+    .replace(/([?&]password=)[^&]*/gi, "$1***");
 }
 
 function runLaunch(cmd, args) {
@@ -332,8 +337,19 @@ function writeElectronLauncherScript() {
   const code = `
 const { app, BrowserWindow } = require("electron");
 const target = process.argv[2];
+const user = process.argv[3] || "";
+const pass = process.argv[4] || "";
 if (!target) process.exit(2);
 app.whenReady().then(() => {
+  if (user) {
+    const auth = "Basic " + Buffer.from(user + ":" + pass).toString("base64");
+    const ses = require("electron").session.defaultSession;
+    ses.webRequest.onBeforeSendHeaders((details, callback) => {
+      details.requestHeaders = details.requestHeaders || {};
+      details.requestHeaders.Authorization = auth;
+      callback({ requestHeaders: details.requestHeaders });
+    });
+  }
   const win = new BrowserWindow({
     width: 1460,
     height: 920,
@@ -343,6 +359,11 @@ app.whenReady().then(() => {
       contextIsolation: true,
       sandbox: true
     }
+  });
+  win.webContents.on("login", (event, _request, _authInfo, callback) => {
+    if (!user) return;
+    event.preventDefault();
+    callback(user, pass);
   });
   win.loadURL(target);
 });
@@ -356,18 +377,36 @@ function electronAppLaunch(url) {
   // Prefer fluxo PowerShell no Windows para evitar path quebrado vindo de /tmp no WSL.
   const psCode = `
 $u='${String(url).replace(/'/g, "''")}';
+$user='${String(WEB_USER || "").replace(/'/g, "''")}';
+$pass='${String(WEB_PASS || "").replace(/'/g, "''")}';
 $tmp = Join-Path $env:TEMP 'dockermt-novnc-electron.js';
 $js = @'
 const { app, BrowserWindow } = require("electron");
 const target = process.argv[2];
+const user = process.argv[3] || "";
+const pass = process.argv[4] || "";
 if (!target) process.exit(2);
 app.whenReady().then(() => {
+  if (user) {
+    const auth = "Basic " + Buffer.from(user + ":" + pass).toString("base64");
+    const ses = require("electron").session.defaultSession;
+    ses.webRequest.onBeforeSendHeaders((details, callback) => {
+      details.requestHeaders = details.requestHeaders || {};
+      details.requestHeaders.Authorization = auth;
+      callback({ requestHeaders: details.requestHeaders });
+    });
+  }
   const win = new BrowserWindow({
     width: 1460,
     height: 920,
     autoHideMenuBar: true,
     backgroundColor: "#111111",
     webPreferences: { contextIsolation: true, sandbox: true }
+  });
+  win.webContents.on("login", (event, _request, _authInfo, callback) => {
+    if (!user) return;
+    event.preventDefault();
+    callback(user, pass);
   });
   win.loadURL(target);
 });
@@ -401,9 +440,9 @@ if(-not $electron){
 }
 if(-not $electron){ exit 1 }
 if($electron.ToLower().EndsWith('.cmd')){
-  Start-Process -WindowStyle Hidden -FilePath $electron -ArgumentList @($tmp, $u) | Out-Null;
+  Start-Process -WindowStyle Hidden -FilePath $electron -ArgumentList @($tmp, $u, $user, $pass) | Out-Null;
 } else {
-  Start-Process -FilePath $electron -ArgumentList @($tmp, $u) | Out-Null;
+  Start-Process -FilePath $electron -ArgumentList @($tmp, $u, $user, $pass) | Out-Null;
 }
 exit 0;
 `.trim();
@@ -413,7 +452,7 @@ exit 0;
   if (isWsl()) return false;
   // Fallback: Linux electron nativo (quando existir).
   const launcher = writeElectronLauncherScript();
-  return runDetachedLaunch("electron", [launcher, url]);
+  return runDetachedLaunch("electron", [launcher, url, WEB_USER, WEB_PASS]);
 }
 
 function powerShellAppLaunch(url, browserHint = "") {
