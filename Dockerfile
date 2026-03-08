@@ -41,12 +41,10 @@ RUN set -eux; \
     if [ -f "${WINEHQ_SRC}.disabled" ]; then mv "${WINEHQ_SRC}.disabled" "${WINEHQ_SRC}"; fi; \
     rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /opt/dockermt /opt/dockermt-full /usr/local/share/dockermt
-
-COPY runtime/INSTALL_SHIM.md /usr/local/share/dockermt/INSTALL_SHIM.md
+RUN mkdir -p /opt/dockermt /opt/dockermt-full
 COPY runtime/dockermt /opt/dockermt/dockermt
-COPY runtime/cmdmt-full/package.json /opt/dockermt-full/package.json
-COPY runtime/cmdmt-full/package-lock.json /opt/dockermt-full/package-lock.json
+COPY runtime/dockermt-core/package.json /opt/dockermt-full/package.json
+COPY runtime/dockermt-core/package-lock.json /opt/dockermt-full/package-lock.json
 
 RUN set -eux; \
     cd /opt/dockermt-full; \
@@ -62,7 +60,7 @@ RUN set -eux; \
     cd /kclient; \
     node -e "require('pulseaudio2'); console.log('pulseaudio2 ABI OK')"
 
-COPY runtime/cmdmt-full/dist /opt/dockermt-full/dist
+COPY runtime/dockermt-core/dist /opt/dockermt-full/dist
 
 RUN chmod +x /opt/dockermt/dockermt \
     && ln -sf /opt/dockermt/dockermt /usr/local/bin/dockermt
@@ -89,15 +87,13 @@ RUN set -eux; \
 # Provisioning padrão: manter serviço TelnetMT + bootstrap habilitados.
 RUN set -eux; \
     sed -i 's/TELNETMT_ENABLE="${TELNETMT_ENABLE:-0}"/TELNETMT_ENABLE="${TELNETMT_ENABLE:-1}"/' /Metatrader/start.sh; \
-    sed -i 's/CMDMT_BOOTSTRAP_ENABLE="${CMDMT_BOOTSTRAP_ENABLE:-0}"/CMDMT_BOOTSTRAP_ENABLE="${CMDMT_BOOTSTRAP_ENABLE:-1}"/' /Metatrader/start.sh
+    sed -i 's/CMDMT_BOOTSTRAP_ENABLE="${CMDMT_BOOTSTRAP_ENABLE:-1}"/CMDMT_BOOTSTRAP_ENABLE="${CMDMT_BOOTSTRAP_ENABLE:-0}"/' /Metatrader/start.sh
 
 # Remove credenciais hardcoded de common.ini no workspace interno da imagem (se existir).
 RUN set -eux; \
     node -e "const fs=require('fs'); const p='/opt/dockermt-full/workspaces/default/.cmdmt/terminal/config/common.ini'; if(fs.existsSync(p)){ let t=fs.readFileSync(p,'utf16le'); t=t.replace(/^\\uFEFF/,'').replace(/^\\s*Login=.*\\r?\\n/gim,'').replace(/^\\s*Password=.*\\r?\\n/gim,'').replace(/^\\s*Server=.*\\r?\\n/gim,''); fs.writeFileSync(p,'\\uFEFF'+t,'utf16le'); }"
 
-# Compatibilidade de caminho legado (sem quebrar wrappers antigos).
-RUN mkdir -p /opt/cmdmt/dist /Metatrader \
-    && ln -sf /opt/dockermt-full/dist/index.js /opt/cmdmt/dist/index.js \
-    && ln -sf /opt/dockermt-full/dist/dockermt.js /opt/cmdmt/dist/dockermt.js \
+# Caminho helper interno para execução unificada.
+RUN mkdir -p /Metatrader \
     && printf '#!/usr/bin/env bash\nset -euo pipefail\nexec /usr/local/bin/dockermt "$@"\n' > /Metatrader/dockermt.sh \
     && chmod +x /Metatrader/dockermt.sh

@@ -2,8 +2,9 @@
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
-const { spawnSync } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 
 const ROOT_DIR = path.resolve(__dirname, "..");
 const ENV_FILE = path.join(ROOT_DIR, ".env");
@@ -65,11 +66,12 @@ const CONTAINER_NAME = envGet("DOCKERMT_CONTAINER_NAME", "dockermt");
 const WEB_PORT = envGet("MT5_WEB_PORT", "43100");
 const WEB_HOST = envGet("DOCKERMT_WEB_HOST", "127.0.0.1");
 const QUIET = envGet("DOCKERMT_QUIET", "0") === "1";
+const OPEN_BROWSER_DEFAULT = String(envGet("DOCKERMT_OPEN_BROWSER", "")).trim().toLowerCase();
 const NAMESPACES = new Set(["container", "docker"]);
 const REQUIRED_ENV_DEFAULTS = {
   MT5_ENABLE_PYTHON: "1",
   TELNETMT_ENABLE: "1",
-  CMDMT_BOOTSTRAP_ENABLE: "1",
+  CMDMT_BOOTSTRAP_ENABLE: "0",
   CMDMT_SYNC_COMMON: "1"
 };
 
@@ -178,6 +180,21 @@ function runLaunch(cmd, args) {
   return r && r.status === 0;
 }
 
+function runDetachedLaunch(cmd, args) {
+  try {
+    const p = spawn(cmd, args, {
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+      windowsHide: true
+    });
+    p.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function parseOpenArgs(args) {
   let appMode = false;
   let browser = "";
@@ -210,9 +227,48 @@ function parseOpenArgs(args) {
       browser = tok.slice("--browser=".length).trim().toLowerCase();
       continue;
     }
+    if (tok === "--electron") {
+      appMode = true;
+      browser = "electron";
+      continue;
+    }
+  }
+  if (!browser && OPEN_BROWSER_DEFAULT) {
+    appMode = true;
+    browser = OPEN_BROWSER_DEFAULT;
   }
   if (browser && !appMode) appMode = true;
   return { appMode, browser };
+}
+
+function writeElectronLauncherScript() {
+  const scriptPath = path.join(os.tmpdir(), "dockermt-novnc-electron.js");
+  const code = `
+const { app, BrowserWindow } = require("electron");
+const target = process.argv[2];
+if (!target) process.exit(2);
+app.whenReady().then(() => {
+  const win = new BrowserWindow({
+    width: 1460,
+    height: 920,
+    autoHideMenuBar: true,
+    backgroundColor: "#111111",
+    webPreferences: {
+      contextIsolation: true,
+      sandbox: true
+    }
+  });
+  win.loadURL(target);
+});
+app.on("window-all-closed", () => app.quit());
+`.trimStart();
+  fs.writeFileSync(scriptPath, code, "utf8");
+  return scriptPath;
+}
+
+function electronAppLaunch(url) {
+  const launcher = writeElectronLauncherScript();
+  return runDetachedLaunch("electron", [launcher, url]);
 }
 
 function powerShellAppLaunch(url, browserHint = "") {
@@ -244,7 +300,9 @@ function tryOpenBrowser(url, opts = {}) {
   const browser = String(opts.browser || "").toLowerCase();
   if (appMode) {
     const appAttempts = [];
-    if (browser === "chrome") {
+    if (browser === "electron") {
+      appAttempts.push(["_electron", []]);
+    } else if (browser === "chrome") {
       appAttempts.push(
         ["_ps_chrome", []],
         ["google-chrome", [`--app=${url}`]],
@@ -265,6 +323,7 @@ function tryOpenBrowser(url, opts = {}) {
     } else {
       // Auto: Chrome/Chromium primeiro; Firefox por ultimo.
       appAttempts.push(
+        ["_electron", []],
         ["_ps_chrome", []],
         ["google-chrome", [`--app=${url}`]],
         ["chromium", [`--app=${url}`]],
@@ -275,7 +334,8 @@ function tryOpenBrowser(url, opts = {}) {
     }
     for (const [cmd, args] of appAttempts) {
       let ok = false;
-      if (cmd === "_ps_chrome") ok = powerShellAppLaunch(url, "chrome");
+      if (cmd === "_electron") ok = electronAppLaunch(url);
+      else if (cmd === "_ps_chrome") ok = powerShellAppLaunch(url, "chrome");
       else if (cmd === "_ps_edge") ok = powerShellAppLaunch(url, "edge");
       else ok = runLaunch(cmd, args);
       if (ok) return true;
@@ -324,7 +384,7 @@ function cmdOpen(opts = {}) {
 function help() {
   process.stdout.write(
     [
-      "dockermt (shim JS host -> container)",
+      "dockermt (host launcher -> container)",
       "",
       "Uso:",
       "  dockermt install|up|start      # docker compose up -d",
@@ -334,7 +394,8 @@ function help() {
       "  dockermt status|ps             # docker compose ps",
       "  dockermt logs [args...]        # docker compose logs ...",
       "  dockermt open                  # sobe stack (se precisar) e abre noVNC",
-      "  dockermt open --app [browser]  # app mode (chrome|chromium|edge|firefox)",
+      "  dockermt open --app [browser]  # app mode (electron|chrome|chromium|edge|firefox)",
+      "  dockermt open --electron       # abre em janela Electron",
       "  dockermt open --browser chrome # equivalente ao app mode",
       "  dockermt monitor               # alias de 'open'",
       "  dockermt container open        # sobe stack + abre noVNC",
@@ -439,7 +500,7 @@ try {
   if (!cmd) {
     if (isInsideContainer()) run("/usr/local/bin/dockermt", [], { cwd: process.cwd() });
     ensureContainerUpForExec();
-    log("entrando no CLI interno do container (modo interativo).");
+    log("executando CLI do container (modo interativo).");
     dockerExec([]);
   }
 
@@ -514,7 +575,7 @@ try {
     // Namespace + other command => proxy to container CLI.
     if (isInsideContainer()) run("/usr/local/bin/dockermt", [nsCmd, ...nsArgs], { cwd: process.cwd() });
     ensureContainerUpForExec();
-    log(`entrando no CLI interno do container com comando: ${[nsCmd, ...nsArgs].join(" ")}`);
+    log(`executando CLI do container: ${[nsCmd, ...nsArgs].join(" ")}`);
     dockerExec([nsCmd, ...nsArgs]);
   }
 
@@ -540,7 +601,7 @@ try {
 
   // Host -> proxy docker exec.
   ensureContainerUpForExec();
-  log(`entrando no CLI interno do container com comando: ${[cmd, ...rest].join(" ")}`);
+  log(`executando CLI do container: ${[cmd, ...rest].join(" ")}`);
   dockerExec([cmd, ...rest]);
 } catch (err) {
   process.stderr.write(String(err && err.message ? err.message : err) + "\n");

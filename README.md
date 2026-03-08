@@ -5,9 +5,9 @@
 ## Modelo adotado
 
 1. O comando real é `/usr/local/bin/dockermt` **dentro do container**.
-2. No host, existe um **shim JS** no repositório: [`bin/dockermt.js`](./bin/dockermt.js).
-3. O launcher [`bin/dockermt`](./bin/dockermt) só chama esse shim JS.
-4. `cmdmt` está descontinuado neste fluxo.
+2. No host, existe um launcher JS no repositório: [`bin/dockermt.js`](./bin/dockermt.js).
+3. O launcher [`bin/dockermt`](./bin/dockermt) só chama esse entrypoint JS.
+4. O fluxo oficial é somente `dockermt`.
 
 ## Pré-requisitos
 
@@ -24,7 +24,7 @@ docker compose -f docker-compose.yaml up -d
 docker compose -f docker-compose.yaml down --remove-orphans
 ```
 
-Via shim:
+Via launcher:
 
 ```bash
 dockermt install     # docker compose up -d
@@ -58,12 +58,13 @@ Observação de segurança/configuração:
 - Esses campos só devem ser escritos via `auth set` + sync.
 - Fonte interna de auth para `common.ini`: `/config/.cmdmt/.env` (volume interno do container).
 
-## Comandos do shim JS (host)
+## Comandos do launcher JS (host)
 
 ```bash
 dockermt --help
 dockermt map-host
 dockermt open
+dockermt open --electron
 dockermt monitor
 dockermt container open
 dockermt logs -f
