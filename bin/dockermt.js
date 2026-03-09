@@ -68,9 +68,9 @@ const WEB_HOST = envGet("DOCKERMT_WEB_HOST", "127.0.0.1");
 const WEB_USER = envGet("DOCKERMT_WEB_USER", envGet("CUSTOM_USER", ""));
 const WEB_PASS = envGet("DOCKERMT_WEB_PASS", envGet("PASSWORD", ""));
 const QUIET = envGet("DOCKERMT_QUIET", "0") === "1";
-const OPEN_BROWSER_DEFAULT = String(envGet("DOCKERMT_OPEN_BROWSER", "")).trim().toLowerCase();
+const OPEN_BROWSER_DEFAULT = String(envGet("DOCKERMT_OPEN_BROWSER", "electron")).trim().toLowerCase();
 const OPEN_WINDOW_DEFAULT = String(envGet("DOCKERMT_OPEN_WINDOW", "2200x1400")).trim();
-const OPEN_MAXIMIZED_DEFAULT = String(envGet("DOCKERMT_OPEN_MAXIMIZED", "1")).trim() === "1";
+const OPEN_MAXIMIZED_DEFAULT = String(envGet("DOCKERMT_OPEN_MAXIMIZED", "0")).trim() === "1";
 const OPEN_COOLDOWN_MS = Number.parseInt(envGet("DOCKERMT_OPEN_COOLDOWN_MS", "0"), 10);
 const NAMESPACES = new Set(["container", "docker"]);
 const REQUIRED_ENV_DEFAULTS = {
