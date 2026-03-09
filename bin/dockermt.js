@@ -71,7 +71,7 @@ const QUIET = envGet("DOCKERMT_QUIET", "0") === "1";
 const OPEN_BROWSER_DEFAULT = String(envGet("DOCKERMT_OPEN_BROWSER", "")).trim().toLowerCase();
 const OPEN_WINDOW_DEFAULT = String(envGet("DOCKERMT_OPEN_WINDOW", "2200x1400")).trim();
 const OPEN_MAXIMIZED_DEFAULT = String(envGet("DOCKERMT_OPEN_MAXIMIZED", "1")).trim() === "1";
-const OPEN_COOLDOWN_MS = Number.parseInt(envGet("DOCKERMT_OPEN_COOLDOWN_MS", "15000"), 10);
+const OPEN_COOLDOWN_MS = Number.parseInt(envGet("DOCKERMT_OPEN_COOLDOWN_MS", "0"), 10);
 const NAMESPACES = new Set(["container", "docker"]);
 const REQUIRED_ENV_DEFAULTS = {
   MT5_ENABLE_PYTHON: "1",
@@ -588,7 +588,7 @@ function cmdOpen(opts = {}) {
   }
   const url = noVncUrl();
   if (shouldSkipOpenLaunch(url, opts)) {
-    process.stdout.write(url + "\n");
+    process.stdout.write(redactSecrets(url) + "\n");
     process.stderr.write("Aviso: open suprimido para evitar duplicacao de janelas (use --force-open para forcar).\n");
     process.exit(0);
   }
