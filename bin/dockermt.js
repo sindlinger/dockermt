@@ -384,23 +384,14 @@ function writeElectronLauncherScript(opts = {}) {
   const width = Number.isFinite(Number(opts.windowWidth)) ? Number(opts.windowWidth) : 1900;
   const height = Number.isFinite(Number(opts.windowHeight)) ? Number(opts.windowHeight) : 1200;
   const maximized = !!opts.maximized;
-  const scriptPath = path.join(os.tmpdir(), "dockermt-novnc-electron.js");
+  const outDir = path.join(ROOT_DIR, ".tmp");
+  fs.mkdirSync(outDir, { recursive: true });
+  const scriptPath = path.join(outDir, "dockermt-novnc-electron.js");
   const code = `
 const { app, BrowserWindow } = require("electron");
 const target = process.argv[2];
-const user = process.argv[3] || "";
-const pass = process.argv[4] || "";
 if (!target) process.exit(2);
 app.whenReady().then(() => {
-  if (user) {
-    const auth = "Basic " + Buffer.from(user + ":" + pass).toString("base64");
-    const ses = require("electron").session.defaultSession;
-    ses.webRequest.onBeforeSendHeaders((details, callback) => {
-      details.requestHeaders = details.requestHeaders || {};
-      details.requestHeaders.Authorization = auth;
-      callback({ requestHeaders: details.requestHeaders });
-    });
-  }
   const win = new BrowserWindow({
     width: ${Math.trunc(width)},
     height: ${Math.trunc(height)},
@@ -411,11 +402,6 @@ app.whenReady().then(() => {
       sandbox: true
     }
   });
-  win.webContents.on("login", (event, _request, _authInfo, callback) => {
-    if (!user) return;
-    event.preventDefault();
-    callback(user, pass);
-  });
   if (${maximized ? "true" : "false"}) win.maximize();
   win.loadURL(target);
 });
@@ -425,90 +411,59 @@ app.on("window-all-closed", () => app.quit());
   return scriptPath;
 }
 
+function toWindowsPath(posixPath) {
+  const p = String(posixPath || "").trim();
+  if (!p) return "";
+  const r = spawnSync("wslpath", ["-w", p], { stdio: ["ignore", "pipe", "ignore"], env: process.env });
+  if (r.status === 0) {
+    const out = String(r.stdout || "").trim();
+    if (out) return out;
+  }
+  return p;
+}
+
+function resolveWindowsElectronBinary() {
+  const ps = [
+    "$e1=Join-Path $env:APPDATA 'npm\\node_modules\\electron\\dist\\electron.exe';",
+    "$e2=Join-Path $env:LOCALAPPDATA 'Programs\\electron\\electron.exe';",
+    "$e3=Join-Path $env:APPDATA 'npm\\electron.cmd';",
+    "if(Test-Path $e1){ Write-Output $e1; exit 0 }",
+    "if(Test-Path $e2){ Write-Output $e2; exit 0 }",
+    "if(Test-Path $e3){ Write-Output $e3; exit 0 }",
+    "exit 1"
+  ].join(" ");
+  const r = spawnSync("powershell.exe", [
+    "-NoLogo",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    ps
+  ], { stdio: ["ignore", "pipe", "ignore"], env: process.env });
+  if (r.status !== 0) return "";
+  return String(r.stdout || "").trim();
+}
+
 function electronAppLaunch(url, opts = {}) {
-  const width = Number.isFinite(Number(opts.windowWidth)) ? Number(opts.windowWidth) : 1900;
-  const height = Number.isFinite(Number(opts.windowHeight)) ? Number(opts.windowHeight) : 1200;
-  const maximized = !!opts.maximized;
-  // Prefer fluxo PowerShell no Windows para evitar path quebrado vindo de /tmp no WSL.
-  const psCode = `
-$u='${String(url).replace(/'/g, "''")}';
-$user='${String(WEB_USER || "").replace(/'/g, "''")}';
-$pass='${String(WEB_PASS || "").replace(/'/g, "''")}';
-$tmp = Join-Path $env:TEMP 'dockermt-novnc-electron.js';
-$js = @'
-const { app, BrowserWindow } = require("electron");
-const target = process.argv[2];
-const user = process.argv[3] || "";
-const pass = process.argv[4] || "";
-if (!target) process.exit(2);
-app.whenReady().then(() => {
-  if (user) {
-    const auth = "Basic " + Buffer.from(user + ":" + pass).toString("base64");
-    const ses = require("electron").session.defaultSession;
-    ses.webRequest.onBeforeSendHeaders((details, callback) => {
-      details.requestHeaders = details.requestHeaders || {};
-      details.requestHeaders.Authorization = auth;
-      callback({ requestHeaders: details.requestHeaders });
-    });
-  }
-  const win = new BrowserWindow({
-    width: ${Math.trunc(width)},
-    height: ${Math.trunc(height)},
-    autoHideMenuBar: true,
-    backgroundColor: "#111111",
-    webPreferences: { contextIsolation: true, sandbox: true }
-  });
-  win.webContents.on("login", (event, _request, _authInfo, callback) => {
-    if (!user) return;
-    event.preventDefault();
-    callback(user, pass);
-  });
-  if (${maximized ? "true" : "false"}) win.maximize();
-  win.loadURL(target);
-});
-app.on("window-all-closed", () => app.quit());
-'@;
-Set-Content -LiteralPath $tmp -Value $js -Encoding UTF8;
-$electron = $null;
-$electronExeNpm = Join-Path $env:APPDATA 'npm\\node_modules\\electron\\dist\\electron.exe';
-$cmd = Get-Command electron -ErrorAction SilentlyContinue;
-if($cmd){
-  $cand = $cmd.Source;
-  if($cand -and $cand.ToLower().EndsWith('.ps1')){
-    if(Test-Path $electronExeNpm){ $cand = $electronExeNpm; }
-    else{
-      $cmdAlt = [System.IO.Path]::ChangeExtension($cand, 'cmd');
-      if(Test-Path $cmdAlt){ $cand = $cmdAlt; }
-    }
-  }
-  if($cand -and (Test-Path $cand)){ $electron = $cand; }
-}
-if(-not $electron){
-  if(Test-Path $electronExeNpm){ $electron = $electronExeNpm; }
-}
-if(-not $electron){
-  $cand1 = Join-Path $env:APPDATA 'npm\\electron.cmd';
-  if(Test-Path $cand1){ $electron = $cand1; }
-}
-if(-not $electron){
-  $cand2 = Join-Path $env:LOCALAPPDATA 'Programs\\electron\\electron.exe';
-  if(Test-Path $cand2){ $electron = $cand2; }
-}
-if(-not $electron){ exit 1 }
-if($electron.ToLower().EndsWith('.cmd')){
-  Start-Process -WindowStyle Hidden -FilePath $electron -ArgumentList @($tmp, $u, $user, $pass) | Out-Null;
-} else {
-  Start-Process -FilePath $electron -ArgumentList @($tmp, $u, $user, $pass) | Out-Null;
-}
-exit 0;
-`.trim();
+  const launcherPosix = writeElectronLauncherScript(opts);
+  const launcherWin = toWindowsPath(launcherPosix);
+  const electronWin = resolveWindowsElectronBinary();
+  if (!launcherWin || !electronWin) return false;
+
+  const psCode = [
+    `$u='${String(url).replace(/'/g, "''")}';`,
+    `$js='${String(launcherWin).replace(/'/g, "''")}';`,
+    `$electron='${String(electronWin).replace(/'/g, "''")}';`,
+    "if(-not (Test-Path $electron)){ exit 1 }",
+    "if($electron.ToLower().EndsWith('.cmd')){ Start-Process -WindowStyle Hidden -FilePath $electron -ArgumentList @($js,$u) | Out-Null; exit 0 }",
+    "Start-Process -FilePath $electron -ArgumentList @($js,$u) | Out-Null; exit 0"
+  ].join(" ");
   const psOk = runPowerShellInline(psCode);
   if (psOk) return true;
   // Em WSL, não usar fallback Linux com `electron` do host (gera path inválido C:\mnt\...).
   if (isWsl()) return false;
   // Fallback: Linux electron nativo (quando existir).
-  const launcher = writeElectronLauncherScript(opts);
-  return runDetachedLaunch("electron", [launcher, url, WEB_USER, WEB_PASS]);
+  return runDetachedLaunch("electron", [launcherPosix, url]);
 }
 
 function powerShellAppLaunch(url, browserHint = "") {
