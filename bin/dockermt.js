@@ -110,6 +110,20 @@ function runNoExit(cmd, args, opts = {}) {
   return r.status;
 }
 
+function runCapture(cmd, args, opts = {}) {
+  const r = spawnSync(cmd, args, {
+    cwd: ROOT_DIR,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: process.env,
+    ...opts
+  });
+  return {
+    status: typeof r.status === "number" ? r.status : 1,
+    stdout: String(r.stdout || ""),
+    stderr: String(r.stderr || "")
+  };
+}
+
 function isInsideContainer() {
   if (fs.existsSync("/.dockerenv")) return true;
   try {
@@ -565,6 +579,35 @@ function cmdOpen(opts = {}) {
   process.exit(0);
 }
 
+function closeDockermtElectron() {
+  const ps = [
+    "$targets = Get-CimInstance Win32_Process -Filter \"name='electron.exe'\" | ",
+    "Where-Object { $_.CommandLine -like '*dockermt-novnc-electron.js*' };",
+    "$count = 0;",
+    "foreach($p in $targets){",
+    "  try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; $count++ } catch {}",
+    "}",
+    "Write-Output (\"closed=\" + $count);",
+    "exit 0"
+  ].join(" ");
+  const r = runCapture("powershell.exe", [
+    "-NoLogo",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    ps
+  ]);
+  if (r.status !== 0) {
+    process.stderr.write("Erro: falha ao fechar janela do dockermt.\n");
+    if (r.stderr.trim()) process.stderr.write(r.stderr.trim() + "\n");
+    process.exit(r.status);
+  }
+  const out = r.stdout.trim() || "closed=0";
+  process.stdout.write(out + "\n");
+  process.exit(0);
+}
+
 function help() {
   process.stdout.write(
     [
@@ -580,11 +623,13 @@ function help() {
       "  dockermt open                  # sobe stack (se precisar) e abre noVNC",
       "  dockermt open --app [browser]  # app mode (electron|chrome|chromium|edge|firefox)",
       "  dockermt open --electron       # abre em janela Electron",
+      "  dockermt close                 # fecha somente janela Electron do dockermt",
       "  dockermt open --window WxH     # tamanho da janela app (ex: 2200x1400)",
       "  dockermt open --maximized      # abre janela maximizada",
       "  dockermt open --browser chrome # equivalente ao app mode",
       "  dockermt monitor               # alias de 'open'",
       "  dockermt container open        # sobe stack + abre noVNC",
+      "  dockermt container close       # fecha somente janela Electron do dockermt",
       "  dockermt container open --app [browser]",
       "  dockermt container monitor     # alias de 'container open'",
       "  dockermt map-host              # mostra mapa host",
@@ -690,6 +735,10 @@ try {
     dockerExec([]);
   }
 
+  if (cmd === "close") {
+    closeDockermtElectron();
+  }
+
   if (cmd === "open" || cmd === "monitor") {
     cmdOpen(parseOpenArgs(rest));
   }
@@ -734,6 +783,10 @@ try {
         if (st !== 0) process.exit(st);
       }
       cmdOpen(parseOpenArgs(nsArgs));
+    }
+
+    if (nsCmd === "close") {
+      closeDockermtElectron();
     }
 
     if (["install", "up", "start", "uninstall", "down", "stop", "status", "ps", "logs", "doctor", "reinstall", "repair"].includes(nsCmd)) {
