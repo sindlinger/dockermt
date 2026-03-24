@@ -1,18 +1,24 @@
 services:
   dockermt:
-    image: ${DOCKERMT_IMAGE:-sindlinger/dockermt:v3.0.3}
-    container_name: dockermt
+    image: ${DOCKERMT_IMAGE:-dockermt:3.1.1}
+    container_name: ${DOCKERMT_CONTAINER_NAME:-dockermt}
+    restart: unless-stopped
     volumes:
-      # Docker managed volume (recommended on Windows; avoids DrvFS bind mount issues)
       - dockermt_config:/config
     ports:
       - "${MT5_WEB_PORT:-43100}:3000"
       - "${MT5_PY_PORT:-48001}:8001"
       - "${TELNETMT_PORT:-41122}:${TELNETMT_PORT:-41122}"
-    env_file:
-      - .env
+    environment:
+      DOCKERMT_CONTAINER_NAME: ${DOCKERMT_CONTAINER_NAME:-dockermt}
+      MT5_WEB_PORT: ${MT5_WEB_PORT:-43100}
+      MT5_PY_PORT: ${MT5_PY_PORT:-48001}
+      TELNETMT_PORT: ${TELNETMT_PORT:-41122}
+      MT5_ENABLE_PYTHON: ${MT5_ENABLE_PYTHON:-1}
+      TELNETMT_ENABLE: ${TELNETMT_ENABLE:-1}
+      CMDMT_BOOTSTRAP_ENABLE: ${CMDMT_BOOTSTRAP_ENABLE:-0}
+      CMDMT_SYNC_COMMON: ${CMDMT_SYNC_COMMON:-1}
 
 volumes:
   dockermt_config:
-    external: true
     name: ${DOCKERMT_CONFIG_VOLUME:-dockermt_config}
