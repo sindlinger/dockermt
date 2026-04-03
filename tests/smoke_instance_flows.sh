@@ -78,6 +78,25 @@ for inst in "${INSTANCES[@]}"; do
     echo "OK plain open guardrail $inst"
   fi
 
+  cfg_common="/config/.wine/drive_c/Program Files/MetaTrader 5/Config/common.ini"
+  cfg_terminal="/config/.wine/drive_c/Program Files/MetaTrader 5/Config/terminal.ini"
+  if ! docker exec "dockermt-$inst" sh -lc "[ -f \"$cfg_common\" ] && [ -f \"$cfg_terminal\" ]" >/dev/null 2>&1; then
+    echo "FAIL config ini seed $inst"
+    docker exec "dockermt-$inst" sh -lc "ls -la '/config/.wine/drive_c/Program Files/MetaTrader 5/Config' | sed -n '1,40p'" || true
+    fails=$((fails + 1))
+  else
+    echo "OK config ini seed $inst"
+  fi
+
+  if docker exec "$CENTRAL_CONTAINER" sh -lc "[ -f '/config/.wine/drive_c/Program Files/MetaTrader 5/Config/accounts.dat' ]" >/dev/null 2>&1; then
+    if ! docker exec "dockermt-$inst" sh -lc "[ -f '/config/.wine/drive_c/Program Files/MetaTrader 5/Config/accounts.dat' ]" >/dev/null 2>&1; then
+      echo "FAIL accounts.dat seed $inst"
+      fails=$((fails + 1))
+    else
+      echo "OK accounts.dat seed $inst"
+    fi
+  fi
+
   rm -f "$shell_out" "$open_out" "$in_out" "$plain_out"
   echo
 

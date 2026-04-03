@@ -37,6 +37,8 @@ DOCKERMT_RUNTIME_UID="${DOCKERMT_RUNTIME_UID:-911}"
 DOCKERMT_RUNTIME_GID="${DOCKERMT_RUNTIME_GID:-911}"
 DOCKERMT_CODEX_DOCS_SOURCE="${DOCKERMT_CODEX_DOCS_SOURCE:-/mnt/c/mql/docs}"
 DOCKERMT_CODEX_AUTH_SOURCE="${DOCKERMT_CODEX_AUTH_SOURCE:-/home/chanfle/.codex}"
+DOCKERMT_CODEX_HOST_MOUNT="${DOCKERMT_CODEX_HOST_MOUNT:-${DOCKERMT_CODEX_AUTH_SOURCE}}"
+DOCKERMT_CODEX_MIRROR_MODE="${DOCKERMT_CODEX_MIRROR_MODE:-hybrid}"
 DOCKERMT_CODEX_HOME_REL="${DOCKERMT_CODEX_HOME_REL:-.dockermt/codex/home}"
 DOCKERMT_CODEX_SESSION_REL="${DOCKERMT_CODEX_SESSION_REL:-.dockermt/codex/session}"
 DOCKERMT_EXTENSIONS_REL="${DOCKERMT_EXTENSIONS_REL:-.dockermt/extensions}"
@@ -45,7 +47,12 @@ DOCKERMT_CODEX_DOCS_REL="${DOCKERMT_CODEX_DOCS_REL:-.dockermt/docs/mql}"
 DOCKERMT_PROJECTS_REGISTRY_DIR="${DOCKERMT_PROJECTS_REGISTRY_DIR:-/config/.dockermt/projects}"
 DOCKERMT_PROJECTS_NETWORK_FILE="${DOCKERMT_PROJECTS_NETWORK_FILE:-${DOCKERMT_PROJECTS_REGISTRY_DIR}/network-index.json}"
 DOCKERMT_PROJECTS_NETWORK_EVENTS_FILE="${DOCKERMT_PROJECTS_NETWORK_EVENTS_FILE:-${DOCKERMT_PROJECTS_REGISTRY_DIR}/network-events.ndjson}"
+DOCKERMT_HOST_MT5_TERMINAL_ROOT="${DOCKERMT_HOST_MT5_TERMINAL_ROOT:-/mnt/c/Users/pichau/AppData/Roaming/MetaQuotes/Terminal}"
+DOCKERMT_HOST_MT5_MOUNT="${DOCKERMT_HOST_MT5_MOUNT:-/config/.dockermt/host-terminal}"
+DOCKERMT_HOST_MT5_ROOT_REL="${DOCKERMT_HOST_MT5_ROOT_REL:-.wine/drive_c/Program Files/MetaTrader 5 Host}"
+DOCKERMT_HOST_MT5_LAYOUT="${DOCKERMT_HOST_MT5_LAYOUT:-portable-bind-v1}"
 RUNTIME_MT5_OPEN_REASON=""
+DOCKERMT_INSTANCE_AUTO_OPEN="${DOCKERMT_INSTANCE_AUTO_OPEN:-0}"
 
 _resolve_runtime_version() {
   if [ -f "$DOCKERMT_VERSION_FILE" ]; then
@@ -1003,6 +1010,159 @@ seed_runtime_shared_mql5_dirs_in_volume() {
     ' >/dev/null 2>&1 || true
 }
 
+docker_host_path_exists() {
+  local host_path="${1:-}"
+  [ -n "$host_path" ] || return 1
+  docker run --rm -v "${host_path}:/hostpath:ro" alpine sh -lc '[ -d /hostpath ] || [ -f /hostpath ]' >/dev/null 2>&1
+}
+
+normalize_mt5_host_hash() {
+  local raw="${1:-}"
+  raw="$(printf '%s' "$raw" | tr '[:lower:]' '[:upper:]')"
+  printf '%s\n' "$raw"
+}
+
+valid_mt5_host_hash() {
+  printf '%s' "${1:-}" | grep -Eq '^[0-9A-F]{32}$'
+}
+
+host_mt5_terminal_path_from_hash() {
+  local hash="${1:-}"
+  [ -n "$hash" ] || return 1
+  printf '%s/%s\n' "${DOCKERMT_HOST_MT5_TERMINAL_ROOT%/}" "$hash"
+}
+
+docker_host_mt5_terminal_exists() {
+  local host_path="${1:-}"
+  [ -n "$host_path" ] || return 1
+  docker run --rm -v "${host_path}:/hostmt5:ro" alpine sh -lc '[ -d /hostmt5/MQL5 ]' >/dev/null 2>&1
+}
+
+host_mt5_entry_is_executable() {
+  local entry_name="${1:-}"
+  local entry_lc
+  entry_lc="$(printf '%s' "$entry_name" | tr '[:upper:]' '[:lower:]')"
+  case "$entry_lc" in
+    terminal64.exe|terminal.exe|metaeditor64.exe|metaeditor.exe|metatester64.exe|metatester.exe|uninstall.exe)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+host_mt5_data_entries() {
+  local host_path="${1:-}"
+  local entry=""
+  [ -n "$host_path" ] || return 1
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if host_mt5_entry_is_executable "$entry"; then
+      continue
+    fi
+    printf '%s\n' "$entry"
+  done <<EOF2
+$(docker run --rm -v "${host_path}:/hostmt5:ro" alpine sh -lc 'ls -1A /hostmt5 | LC_ALL=C sort' 2>/dev/null || true)
+EOF2
+}
+
+host_mt5_entries_fingerprint() {
+  local host_path="${1:-}"
+  [ -n "$host_path" ] || return 1
+  host_mt5_data_entries "$host_path" | sha256sum | awk '{print $1}'
+}
+
+prepare_host_mt5_runtime_in_volume() {
+  local target_volume="${1:-}"
+  local refresh_mode="${2:-refresh}"
+  [ -n "$target_volume" ] || return 1
+  docker volume inspect "$target_volume" >/dev/null 2>&1 || return 1
+  docker run --rm \
+    -e "MT5_ROOT_REL=${DOCKERMT_MT5_ROOT_REL}" \
+    -e "HOST_MT5_ROOT_REL=${DOCKERMT_HOST_MT5_ROOT_REL}" \
+    -e "REFRESH_MODE=${refresh_mode}" \
+    -v "${target_volume}:/config" \
+    alpine sh -lc '
+      set -eu
+      src="/config/${MT5_ROOT_REL}"
+      dst="/config/${HOST_MT5_ROOT_REL}"
+      [ -f "$src/terminal64.exe" ]
+      case "${REFRESH_MODE:-ensure}" in
+        refresh|reset|force)
+          rm -rf "$dst"
+          ;;
+      esac
+      if [ ! -f "$dst/terminal64.exe" ]; then
+        mkdir -p "$(dirname "$dst")"
+        cp -a "$src" "$dst"
+      fi
+    ' >/dev/null 2>&1
+}
+
+resolve_codex_host_mount_source() {
+  local mode="${DOCKERMT_CODEX_MIRROR_MODE:-hybrid}"
+  local host_path="${DOCKERMT_CODEX_HOST_MOUNT:-${DOCKERMT_CODEX_AUTH_SOURCE:-}}"
+  case "$mode" in
+    hybrid|mount|auto|'')
+      ;;
+    copy|off|none|disabled)
+      return 1
+      ;;
+    *)
+      ;;
+  esac
+  [ -n "$host_path" ] || return 1
+  docker_host_path_exists "$host_path" || return 1
+  printf '%s\n' "$host_path"
+}
+
+sync_codex_profile_into_volume() {
+  local target_volume="${1:-}"
+  local host_path="${2:-}"
+  [ -n "$target_volume" ] || return 1
+  [ -n "$host_path" ] || return 0
+  docker_host_path_exists "$host_path" || return 0
+  docker run --rm \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -e "CODEX_HOME_REL=${DOCKERMT_CODEX_HOME_REL}" \
+    -v "${target_volume}:/config" \
+    -v "${host_path}:/codex-host:ro" \
+    alpine sh -lc '
+      set -eu
+      src="/codex-host"
+      dst="/config/${CODEX_HOME_REL}/.codex"
+      mkdir -p "$dst"
+
+      copy_file() {
+        name="$1"
+        [ -f "$src/$name" ] || return 0
+        cp -f "$src/$name" "$dst/$name"
+      }
+
+      copy_dir() {
+        name="$1"
+        [ -d "$src/$name" ] || return 0
+        rm -rf "$dst/$name"
+        mkdir -p "$dst/$name"
+        cd "$src/$name" && tar cf - . | (cd "$dst/$name" && tar xf -)
+      }
+
+      copy_file "auth.json"
+      copy_file ".credentials.json"
+      copy_file "config.toml"
+      copy_file "version.json"
+      copy_file "models_cache.json"
+      copy_file ".personality_migration"
+      copy_dir "skills"
+      copy_dir "plugins"
+      copy_dir "rules"
+
+      chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "$dst" || true
+      find "$dst" -type d -exec chmod 700 {} +
+      find "$dst" -type f -exec chmod 600 {} +
+    ' >/dev/null 2>&1 || true
+}
+
 sync_codex_auth_into_volume() {
   local target_volume="${1:-}"
   [ -n "$target_volume" ] || return 1
@@ -1135,13 +1295,44 @@ dockermt() {
   }
 
   __dockermt_pick_display() {
-    local resolved="${DOCKERMT_APP_DISPLAY:-${DISPLAY:-}}"
-    if [ -z "$resolved" ] && [ -r /etc/resolv.conf ]; then
-      local ns=""
-      ns="$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
-      if [ -n "$ns" ]; then
-        resolved="${ns}:0"
+    local forced="${DOCKERMT_APP_DISPLAY:-}" resolved="${DISPLAY:-}"
+    local display_num="0" host=""
+    if [ -n "$forced" ]; then
+      printf '%s\n' "$forced"
+      return 0
+    fi
+    if [ -n "$resolved" ]; then
+      case "$resolved" in
+        :*|localhost:*|127.0.0.1:*|unix:*)
+          ;;
+        *)
+          printf '%s\n' "$resolved"
+          return 0
+          ;;
+      esac
+      case "$resolved" in
+        *:*)
+          display_num="${resolved##*:}"
+          display_num="${display_num%%.*}"
+          ;;
+      esac
+    fi
+    case "$display_num" in
+      ''|*[!0-9]*)
+        display_num="0"
+        ;;
+    esac
+    if [ -r /etc/resolv.conf ]; then
+      host="$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
+      if [ -n "$host" ]; then
+        printf '%s:%s\n' "$host" "$display_num"
+        return 0
       fi
+    fi
+    host="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+    if [ -n "$host" ]; then
+      printf '%s:%s\n' "$host" "$display_num"
+      return 0
     fi
     printf '%s\n' "$resolved"
   }
@@ -1344,13 +1535,44 @@ dockermt() {
   }
 
   __dockermt_pick_display() {
-    local resolved="${DOCKERMT_APP_DISPLAY:-${DISPLAY:-}}"
-    if [ -z "$resolved" ] && [ -r /etc/resolv.conf ]; then
-      local ns=""
-      ns="$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
-      if [ -n "$ns" ]; then
-        resolved="${ns}:0"
+    local forced="${DOCKERMT_APP_DISPLAY:-}" resolved="${DISPLAY:-}"
+    local display_num="0" host=""
+    if [ -n "$forced" ]; then
+      printf '%s\n' "$forced"
+      return 0
+    fi
+    if [ -n "$resolved" ]; then
+      case "$resolved" in
+        :*|localhost:*|127.0.0.1:*|unix:*)
+          ;;
+        *)
+          printf '%s\n' "$resolved"
+          return 0
+          ;;
+      esac
+      case "$resolved" in
+        *:*)
+          display_num="${resolved##*:}"
+          display_num="${display_num%%.*}"
+          ;;
+      esac
+    fi
+    case "$display_num" in
+      ''|*[!0-9]*)
+        display_num="0"
+        ;;
+    esac
+    if [ -r /etc/resolv.conf ]; then
+      host="$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
+      if [ -n "$host" ]; then
+        printf '%s:%s\n' "$host" "$display_num"
+        return 0
       fi
+    fi
+    host="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+    if [ -n "$host" ]; then
+      printf '%s:%s\n' "$host" "$display_num"
+      return 0
     fi
     printf '%s\n' "$resolved"
   }
@@ -1458,6 +1680,8 @@ DOCKERMT_WORKSPACE_FACTORY_VOLUME=${workspace_volume}
 DOCKERMT_WEB_PORT=3000
 DOCKERMT_TELNET_PORT=1122
 DOCKERMT_PY_PORT=8001
+DOCKERMT_CODEX_HOST_MOUNT=${DOCKERMT_CODEX_HOST_MOUNT}
+DOCKERMT_CODEX_MIRROR_MODE=${DOCKERMT_CODEX_MIRROR_MODE}
 EOF
   printf '%s\n' "$out"
 }
@@ -1486,9 +1710,12 @@ services:
       TELNETMT_PORT: ${DOCKERMT_TELNET_PORT}
       MT5_WEB_PORT: ${DOCKERMT_WEB_PORT}
       MT5_PY_PORT: ${DOCKERMT_PY_PORT}
+      DOCKERMT_CODEX_HOST_MOUNT: ${DOCKERMT_CODEX_HOST_MOUNT}
+      DOCKERMT_CODEX_MIRROR_MODE: ${DOCKERMT_CODEX_MIRROR_MODE}
     volumes:
       - ${DOCKERMT_CONFIG_VOLUME}:/config
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${DOCKERMT_CODEX_HOST_MOUNT}:/config/.dockermt/codex/host-profile:ro
     ports:
       - "${DOCKERMT_WEB_PORT}:3000"
       - "${DOCKERMT_TELNET_PORT}:1122"
@@ -1768,12 +1995,18 @@ Abre o MetaTrader do runtime atual, ou de uma instancia nomeada, e informa a URL
 ${CLR_HDR}Usage:${CLR_RST}
   ${CLR_CMD}dockermt container open${CLR_RST}
   ${CLR_CMD}dockermt container open${CLR_RST} NOME
+  ${CLR_CMD}dockermt container open --host${CLR_RST}
   ${CLR_CMD}dockermt container open --url URL${CLR_RST}
 
 ${CLR_HDR}Examples:${CLR_RST}
   ${CLR_CMD}dockermt container open${CLR_RST}
   ${CLR_CMD}dockermt container open dockermt-emptymod${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod container open --host${CLR_RST}
   ${CLR_CMD}dockermt container open --url http://localhost:3000${CLR_RST}
+
+${CLR_HDR}Notes:${CLR_RST}
+  ${CLR_CMD}--host${CLR_RST} abre o segundo MT5 host-backed da instancia, quando configurado por
+  ${CLR_CMD}dockermt instance create NOME --host-hash HASH${CLR_RST}.
 USAGE
       ;;
     list)
@@ -1958,6 +2191,7 @@ ${CLR_HDR}Options:${CLR_RST}
   ${CLR_CMD}--library${CLR_RST} ITEM          Importa library especifica na criacao.
   ${CLR_CMD}--script${CLR_RST} ITEM           Importa script especifico na criacao.
   ${CLR_CMD}--files${CLR_RST} ITEM            Importa arquivo especifico em MQL5/Files.
+  ${CLR_CMD}--host-hash${CLR_RST} HASH        Monta Terminal/HASH do host e habilita um segundo MT5 host-backed.
   ${CLR_CMD}--volume${CLR_RST} VOLUME         Reutiliza um volume de workspace especifico.
   ${CLR_CMD}--snapshot${CLR_RST} SNAPSHOT     Usa um snapshot especifico como base.
 
@@ -1966,6 +2200,7 @@ ${CLR_HDR}Examples:${CLR_RST}
   ${CLR_CMD}dockermt instance create harm --color gray --text-color black${CLR_RST}
   ${CLR_CMD}dockermt instance create models -u 0${CLR_RST}
   ${CLR_CMD}dockermt instance create onnxlab --indicator rsi_laguerre${CLR_RST}
+  ${CLR_CMD}dockermt instance create hostlab --host-hash 52E3C7528FE12BDA2F3639AB7D13403D${CLR_RST}
   ${CLR_CMD}dockermt instance create neuro --expert NeuroNet_DNG${CLR_RST}
   ${CLR_CMD}dockermt instance create worker --service ExampleService${CLR_RST}
   ${CLR_CMD}dockermt @emptymod help${CLR_RST}
@@ -1976,6 +2211,8 @@ ${CLR_HDR}Examples:${CLR_RST}
 ${CLR_HDR}Notes:${CLR_RST}
   Indicators e experts custom nascem limpos.
   A instancia nasce da base factory; use flags --include/--library/--service para trazer itens adicionais.
+  ${CLR_CMD}--host-hash${CLR_RST} cria um segundo MT5 da instancia usando a arvore Terminal/HASH do host
+  sem substituir o MT5 principal; depois use ${CLR_CMD}dockermt @NOME container open --host${CLR_RST}.
 USAGE
       ;;
     rename)
@@ -2243,6 +2480,12 @@ container_env_value() {
     | tail -n 1
 }
 
+container_user_value() {
+  local container_name="${1:-}"
+  [ -n "$container_name" ] || return 0
+  docker inspect "$container_name" --format '{{.Config.User}}' 2>/dev/null || true
+}
+
 migrate_instance_workspace_dirs_in_volume() {
   local target_volume="${1:-}"
   local old_slug="${2:-}"
@@ -2293,7 +2536,10 @@ runtime_instance_rename_apply() {
   local old_container old_short new_short new_container
   local image config_volume state_volume parent_container old_user
   local telnet_port web_port py_port runtime_status
+  local existing_host_hash existing_host_mount existing_host_source existing_host_root_rel
+  local existing_host_runtime_source existing_host_entries_fingerprint existing_host_entry
   local -a runtime_user_args=()
+  local -a host_mt5_run_args=()
   local runtime_src_dockermt runtime_src_shell runtime_src_args runtime_src_dispatch
 
   old_container="$(normalize_runtime_target "$old_ref")"
@@ -2331,8 +2577,51 @@ runtime_instance_rename_apply() {
   [ -n "$telnet_port" ] || { echo "ERR: porta host Telnet da instancia atual nao encontrada." >&2; return 1; }
   [ -n "$web_port" ] || { echo "ERR: porta host Web da instancia atual nao encontrada." >&2; return 1; }
   [ -n "$py_port" ] || { echo "ERR: porta host Python da instancia atual nao encontrada." >&2; return 1; }
+  existing_host_hash="$(runtime_container_label "$old_container" "dockermt.host-mt5.hash")"
+  if [ -z "$existing_host_hash" ]; then
+    existing_host_hash="$(container_env_value "$old_container" "DOCKERMT_HOST_MT5_HASH")"
+  fi
+  existing_host_mount="$(runtime_container_label "$old_container" "dockermt.host-mt5.mount")"
+  if [ -z "$existing_host_mount" ]; then
+    existing_host_mount="$(container_env_value "$old_container" "DOCKERMT_HOST_MT5_MOUNT")"
+  fi
+  [ -n "$existing_host_mount" ] || existing_host_mount="$DOCKERMT_HOST_MT5_MOUNT"
+  existing_host_source="$(container_mount_source_for_destination "$old_container" "$existing_host_mount")"
+  existing_host_root_rel="$(container_env_value "$old_container" "DOCKERMT_HOST_MT5_ROOT_REL")"
+  [ -n "$existing_host_root_rel" ] || existing_host_root_rel="$DOCKERMT_HOST_MT5_ROOT_REL"
+  if [ -n "$existing_host_hash" ]; then
+    existing_host_runtime_source="$(host_mt5_terminal_path_from_hash "$existing_host_hash")"
+    if docker_host_mt5_terminal_exists "$existing_host_runtime_source"; then
+      existing_host_source="$existing_host_runtime_source"
+    fi
+  fi
   if [ -n "$old_user" ]; then
     runtime_user_args=(--user "$old_user")
+  fi
+  if [ -n "$existing_host_hash" ] && [ -n "$existing_host_source" ]; then
+    existing_host_entries_fingerprint="$(host_mt5_entries_fingerprint "$existing_host_source" 2>/dev/null || true)"
+    host_mt5_run_args=(
+      -e "DOCKERMT_HOST_MT5_HASH=$existing_host_hash"
+      -e "DOCKERMT_HOST_MT5_MOUNT=$existing_host_mount"
+      -e "DOCKERMT_HOST_MT5_ROOT_REL=$existing_host_root_rel"
+      -v "${existing_host_source}:${existing_host_mount}:rw"
+      --label "dockermt.host-mt5.enabled=1"
+      --label "dockermt.host-mt5.hash=$existing_host_hash"
+      --label "dockermt.host-mt5.layout=$DOCKERMT_HOST_MT5_LAYOUT"
+      --label "dockermt.host-mt5.mount=$existing_host_mount"
+      --label "dockermt.host-mt5.entries=${existing_host_entries_fingerprint:-none}"
+    )
+    while IFS= read -r existing_host_entry; do
+      [ -n "$existing_host_entry" ] || continue
+      host_mt5_run_args+=(
+        -v "${existing_host_source}/${existing_host_entry}:/config/${existing_host_root_rel}/${existing_host_entry}:rw"
+      )
+    done <<EOF2
+$(host_mt5_data_entries "$existing_host_source")
+EOF2
+  elif [ -n "$existing_host_hash" ]; then
+    echo "ERR: a instancia usa host-hash ${existing_host_hash}, mas a arvore Terminal/${existing_host_hash} nao esta acessivel para o rename." >&2
+    return 1
   fi
 
   echo "[dockermt] rename: ${old_short} -> ${new_short}"
@@ -2344,6 +2633,13 @@ runtime_instance_rename_apply() {
   echo "[dockermt] migrando diretorios da instancia..."
   migrate_instance_workspace_dirs_in_volume "$config_volume" "$old_short" "$new_short"
   prepare_codex_layout_in_volume "$config_volume" "$new_short" reuse
+  if [ -n "$existing_host_hash" ] && [ "${#host_mt5_run_args[@]}" -gt 0 ]; then
+    prepare_host_mt5_runtime_in_volume "$config_volume" refresh || {
+      echo "ERR: falha ao preparar o runtime portable host-backed antes do rename." >&2
+      docker start "$old_container" >/dev/null 2>&1 || true
+      return 1
+    }
+  fi
 
   echo "[dockermt] criando container renomeado..."
   if ! docker run -d \
@@ -2367,6 +2663,7 @@ runtime_instance_rename_apply() {
     -e "DOCKERMT_DOCKER_SOCKET_PATH=$DOCKER_SOCKET_PATH" \
     -v "${config_volume}:/config" \
     -v "${DOCKER_SOCKET_PATH}:${DOCKER_SOCKET_PATH}" \
+    "${host_mt5_run_args[@]}" \
     -p "${telnet_port}:1122" \
     -p "${web_port}:3000" \
     -p "${py_port}:8001" \
@@ -2427,7 +2724,9 @@ state-volume : $state_volume
 url          : $(runtime_web_url "$new_container")
 shell        : dockermt @$new_short shell
 open         : dockermt @$new_short container open
+open-host    : $( [ -n "$existing_host_hash" ] && printf 'dockermt @%s container open --host' "$new_short" || printf 'nao configurado' )
 status       : dockermt @$new_short container status
+host-hash    : $( [ -n "$existing_host_hash" ] && printf '%s' "$existing_host_hash" || printf 'nenhum' )
 EOF2
 }
 
@@ -3163,6 +3462,22 @@ current_container_config_volume() {
   docker inspect "$container_name" --format '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Name}}{{end}}{{end}}' 2>/dev/null || true
 }
 
+container_has_mount_destination() {
+  local container_name="${1:-}"
+  local destination="${2:-}"
+  [ -n "$container_name" ] || return 1
+  [ -n "$destination" ] || return 1
+  docker inspect "$container_name" --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>/dev/null | grep -Fxq "$destination"
+}
+
+container_mount_source_for_destination() {
+  local container_name="${1:-}"
+  local destination="${2:-}"
+  [ -n "$container_name" ] || return 1
+  [ -n "$destination" ] || return 1
+  docker inspect "$container_name" --format '{{range .Mounts}}{{if eq .Destination "'"$destination"'"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true
+}
+
 current_container_status() {
   local container_name
   container_name="$(normalize_runtime_target "${1:-}")"
@@ -3185,10 +3500,55 @@ runtime_internal_open_url() {
   printf 'http://127.0.0.1:6900\n'
 }
 
-runtime_external_display() {
-  if [ -n "${DOCKERMT_APP_DISPLAY:-}" ]; then
-    printf '%s\n' "$DOCKERMT_APP_DISPLAY"
+runtime_guess_external_display() {
+  local source_display="${1:-${DISPLAY:-}}"
+  local host="" display_num="0"
+  case "$source_display" in
+    *:*)
+      display_num="${source_display##*:}"
+      display_num="${display_num%%.*}"
+      ;;
+  esac
+  case "$display_num" in
+    ''|*[!0-9]*)
+      display_num="0"
+      ;;
+  esac
+  if [ -n "${DOCKERMT_X410_HOST:-}" ]; then
+    printf '%s:%s\n' "$DOCKERMT_X410_HOST" "$display_num"
     return 0
+  fi
+  if [ -r /etc/resolv.conf ]; then
+    host="$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
+    if [ -n "$host" ]; then
+      printf '%s:%s\n' "$host" "$display_num"
+      return 0
+    fi
+  fi
+  host="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+  if [ -n "$host" ]; then
+    printf '%s:%s\n' "$host" "$display_num"
+    return 0
+  fi
+  if getent hosts host.docker.internal >/dev/null 2>&1; then
+    printf 'host.docker.internal:%s\n' "$display_num"
+    return 0
+  fi
+  return 1
+}
+
+runtime_external_display() {
+  local resolved=""
+  if [ -n "${DOCKERMT_APP_DISPLAY:-}" ]; then
+    resolved="$DOCKERMT_APP_DISPLAY"
+    case "$resolved" in
+      :*|localhost:*|127.0.0.1:*|unix:*)
+        ;;
+      *)
+        printf '%s\n' "$resolved"
+        return 0
+        ;;
+    esac
   fi
   if [ -n "${DISPLAY:-}" ]; then
     case "$DISPLAY" in
@@ -3200,11 +3560,34 @@ runtime_external_display() {
         ;;
     esac
   fi
+  if resolved="$(runtime_guess_external_display "${DOCKERMT_APP_DISPLAY:-${DISPLAY:-}}" 2>/dev/null)"; then
+    [ -n "$resolved" ] && printf '%s\n' "$resolved" && return 0
+  fi
   return 1
 }
 
 runtime_mt5_path() {
-  printf '/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe\n'
+  local mode="${1:-default}"
+  case "$mode" in
+    host)
+      printf '/config/%s/terminal64.exe\n' "$DOCKERMT_HOST_MT5_ROOT_REL"
+      ;;
+    *)
+      printf '/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe\n'
+      ;;
+  esac
+}
+
+runtime_mt5_launch_args() {
+  local mode="${1:-default}"
+  case "$mode" in
+    host)
+      printf '/portable\n'
+      ;;
+    *)
+      return 0
+      ;;
+  esac
 }
 
 runtime_prepare_user_runtime_dir() {
@@ -3243,38 +3626,147 @@ runtime_mt5linux_start() {
 }
 
 runtime_mt5_window_title() {
+  local mode="${1:-default}"
   local instance_name
   instance_name="${DOCKERMT_INSTANCE_NAME:-${HOSTNAME:-dockermt}}"
-  printf 'DockerMT [%s] MT5\n' "$instance_name"
+  case "$mode" in
+    host)
+      printf 'DockerMT [%s] MT5 Host\n' "$instance_name"
+      ;;
+    *)
+      printf 'DockerMT [%s] MT5\n' "$instance_name"
+      ;;
+  esac
+}
+
+runtime_mt5_target_desktop() {
+  local desktop="${DOCKERMT_MT5_DESKTOP:-1}"
+  case "$desktop" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$desktop"
+}
+
+runtime_host_mt5_enabled() {
+  [ -n "${DOCKERMT_HOST_MT5_HASH:-}" ] && valid_mt5_host_hash "${DOCKERMT_HOST_MT5_HASH:-}"
+}
+
+runtime_host_mt5_mount_path() {
+  printf '%s\n' "${DOCKERMT_HOST_MT5_MOUNT:-/config/.dockermt/host-terminal}"
+}
+
+runtime_prepare_host_mt5_runtime() {
+  local mount_root target_root runtime_meta
+  RUNTIME_MT5_OPEN_REASON=""
+  if ! runtime_host_mt5_enabled; then
+    RUNTIME_MT5_OPEN_REASON="instancia sem host-hash configurado"
+    return 1
+  fi
+  mount_root="$(runtime_host_mt5_mount_path)"
+  target_root="/config/${DOCKERMT_HOST_MT5_ROOT_REL}"
+  runtime_meta="/config/.dockermt/host-mt5"
+  if [ ! -d "$mount_root" ]; then
+    RUNTIME_MT5_OPEN_REASON="bind mount do host ausente em $mount_root"
+    return 1
+  fi
+  if [ ! -d "$mount_root/MQL5" ]; then
+    RUNTIME_MT5_OPEN_REASON="Terminal/${DOCKERMT_HOST_MT5_HASH:-} do host sem MQL5 em $mount_root"
+    return 1
+  fi
+  mkdir -p "$(dirname "$target_root")" "$runtime_meta"
+  if [ ! -f "$target_root/terminal64.exe" ]; then
+    RUNTIME_MT5_OPEN_REASON="runtime portable do host ausente em $target_root; recrie a instancia"
+    return 1
+  fi
+  printf 'hash=%s\nmount=%s\nruntime=%s\n' \
+    "${DOCKERMT_HOST_MT5_HASH:-}" \
+    "$mount_root" \
+    "$target_root" > "${runtime_meta}/manifest.env"
+  return 0
 }
 
 runtime_mt5_window_id() {
   local target_display="${1:-}"
+  local mt5file="${2:-$(runtime_mt5_path)}"
   local runtime_dir="" listing
   [ -n "$target_display" ] || return 1
   runtime_dir="$(runtime_prepare_user_runtime_dir)"
-  listing="$(runtime_run_as_mt5_user "DISPLAY='$target_display' wmctrl -lx" "$runtime_dir" 2>/dev/null || true)"
-  printf '%s\n' "$listing" | awk '$3 ~ /terminal64\.exe\.terminal64\.exe/ { print $1; exit }'
+  listing="$(runtime_run_as_mt5_user "DISPLAY='$target_display' wmctrl -lxp" "$runtime_dir" 2>/dev/null || true)"
+  while IFS=$'\t' read -r window_id window_pid; do
+    [ -n "$window_id" ] || continue
+    [ -n "$window_pid" ] || continue
+    if ps -p "$window_pid" -o args= 2>/dev/null | grep -Fq "$mt5file"; then
+      printf '%s\n' "$window_id"
+      return 0
+    fi
+  done <<EOF2
+$(printf '%s\n' "$listing" | awk '$3 ~ /^[0-9]+$/ { print $1 "\t" $3 }')
+EOF2
+  printf '%s\n' "$listing" | awk '$4 ~ /terminal64\.exe\.terminal64\.exe/ { print $1; exit }'
+}
+
+runtime_mt5_process_running() {
+  local mt5file="${1:-}"
+  if [ -n "$mt5file" ]; then
+    ps -ef 2>/dev/null | grep -F "$mt5file" | grep -v grep >/dev/null 2>&1
+  else
+    ps -ef 2>/dev/null | grep -F 'terminal64.exe' | grep -v grep >/dev/null 2>&1
+  fi
 }
 
 runtime_rename_mt5_window() {
   local target_display="${1:-}"
+  local mt5file="${2:-$(runtime_mt5_path)}"
+  local title="${3:-$(runtime_mt5_window_title)}"
   local runtime_dir=""
   [ -n "$target_display" ] || return 1
-  local window_id title
-  window_id="$(runtime_mt5_window_id "$target_display")"
+  local window_id
+  window_id="$(runtime_mt5_window_id "$target_display" "$mt5file")"
   [ -n "$window_id" ] || return 1
-  title="$(runtime_mt5_window_title)"
   runtime_dir="$(runtime_prepare_user_runtime_dir)"
   runtime_run_as_mt5_user "DISPLAY='$target_display' wmctrl -ir '$window_id' -T '$title'" "$runtime_dir" >/dev/null 2>&1 || return 1
 }
 
+runtime_move_mt5_window_to_desktop() {
+  local target_display="${1:-}"
+  local target_desktop="${2:-}"
+  local mt5file="${3:-$(runtime_mt5_path)}"
+  local runtime_dir="" window_id
+  [ -n "$target_display" ] || return 1
+  [ -n "$target_desktop" ] || return 1
+  window_id="$(runtime_mt5_window_id "$target_display" "$mt5file")"
+  [ -n "$window_id" ] || return 1
+  runtime_dir="$(runtime_prepare_user_runtime_dir)"
+  runtime_run_as_mt5_user "DISPLAY='$target_display' wmctrl -ir '$window_id' -t '$target_desktop'" "$runtime_dir" >/dev/null 2>&1 || return 1
+}
+
 runtime_wait_and_rename_mt5_window() {
   local target_display="${1:-}"
-  local tries="${2:-12}"
+  local mt5file="${2:-$(runtime_mt5_path)}"
+  local title="${3:-$(runtime_mt5_window_title)}"
+  local tries="${4:-12}"
   [ -n "$target_display" ] || return 1
   while [ "$tries" -gt 0 ]; do
-    if runtime_rename_mt5_window "$target_display"; then
+    if runtime_rename_mt5_window "$target_display" "$mt5file" "$title"; then
+      return 0
+    fi
+    sleep 1
+    tries=$((tries - 1))
+  done
+  return 1
+}
+
+runtime_wait_and_move_mt5_window_desktop() {
+  local target_display="${1:-}"
+  local target_desktop="${2:-}"
+  local mt5file="${3:-$(runtime_mt5_path)}"
+  local tries="${4:-12}"
+  [ -n "$target_display" ] || return 1
+  [ -n "$target_desktop" ] || return 1
+  while [ "$tries" -gt 0 ]; do
+    if runtime_move_mt5_window_to_desktop "$target_display" "$target_desktop" "$mt5file"; then
       return 0
     fi
     sleep 1
@@ -3305,11 +3797,16 @@ rename_instance_mt5_window_in_container() {
 
 runtime_open_mt5_on_display() {
   local target_display="${1:-}"
-  local launch_err window_id log_reason runtime_dir
+  local mode="${2:-default}"
+  local launch_err window_id log_reason runtime_dir target_desktop launch_args launch_cmd title
   RUNTIME_MT5_OPEN_REASON=""
   [ -n "$target_display" ] || return 1
   local mt5file out_log err_log
-  mt5file="$(runtime_mt5_path)"
+  if [ "$mode" = "host" ]; then
+    runtime_prepare_host_mt5_runtime || return 1
+  fi
+  mt5file="$(runtime_mt5_path "$mode")"
+  title="$(runtime_mt5_window_title "$mode")"
   if [ ! -f "$mt5file" ]; then
     RUNTIME_MT5_OPEN_REASON="terminal64.exe nao encontrado em $mt5file"
     return 1
@@ -3318,22 +3815,48 @@ runtime_open_mt5_on_display() {
     RUNTIME_MT5_OPEN_REASON="wine nao encontrado no runtime"
     return 1
   fi
-  out_log="/config/dockermt/runtime/mt5-open.out"
-  err_log="/config/dockermt/runtime/mt5-open.err"
+  out_log="/config/dockermt/runtime/mt5-${mode}-open.out"
+  err_log="/config/dockermt/runtime/mt5-${mode}-open.err"
   mkdir -p /config/dockermt/runtime
   chown -R abc:abc /config/dockermt/runtime
   runtime_dir="$(runtime_prepare_user_runtime_dir)"
-  runtime_run_as_mt5_user "WINEPREFIX='/config/.wine' wineserver -k" "$runtime_dir" >/dev/null 2>&1 || true
-  sleep 3
-  launch_err="$(runtime_run_as_mt5_user "DISPLAY='$target_display' WINEPREFIX='/config/.wine' WINEDEBUG='-all' nohup wine '$mt5file' >'$out_log' 2>'$err_log' &" "$runtime_dir" 2>&1 >/dev/null || true)"
+  window_id="$(runtime_mt5_window_id "$target_display" "$mt5file" || true)"
+  if [ -n "$window_id" ]; then
+    runtime_wait_and_rename_mt5_window "$target_display" "$mt5file" "$title" 4 >/dev/null 2>&1 || true
+    target_desktop="$(runtime_mt5_target_desktop 2>/dev/null || true)"
+    if [ -n "$target_desktop" ]; then
+      runtime_wait_and_move_mt5_window_desktop "$target_display" "$target_desktop" "$mt5file" 4 >/dev/null 2>&1 || true
+    fi
+    if [ "$mode" != "host" ]; then
+      runtime_mt5linux_start "$target_display"
+    fi
+    return 0
+  fi
+  if ! runtime_mt5_process_running; then
+    runtime_run_as_mt5_user "WINEPREFIX='/config/.wine' wineserver -k" "$runtime_dir" >/dev/null 2>&1 || true
+    sleep 3
+  fi
+  launch_args="$(runtime_mt5_launch_args "$mode" 2>/dev/null || true)"
+  launch_cmd="DISPLAY='$target_display' WINEPREFIX='/config/.wine' WINEDEBUG='-all' nohup wine '$mt5file'"
+  if [ -n "$launch_args" ]; then
+    launch_cmd="$launch_cmd $launch_args"
+  fi
+  launch_cmd="$launch_cmd >'$out_log' 2>'$err_log' &"
+  launch_err="$(runtime_run_as_mt5_user "$launch_cmd" "$runtime_dir" 2>&1 >/dev/null || true)"
   if [ -n "$launch_err" ]; then
     launch_err="$(printf '%s' "$launch_err" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
     RUNTIME_MT5_OPEN_REASON="falha ao iniciar MT5 no display $target_display: $launch_err"
     return 1
   fi
   sleep 6
-  window_id="$(runtime_mt5_window_id "$target_display" || true)"
+  window_id="$(runtime_mt5_window_id "$target_display" "$mt5file" || true)"
   if [ -z "$window_id" ]; then
+    if runtime_mt5_process_running "$mt5file"; then
+      if [ "$mode" != "host" ]; then
+        runtime_mt5linux_start "$target_display"
+      fi
+      return 0
+    fi
     log_reason="$(sed -n '1p' "$err_log" 2>/dev/null | tr -d '\r' || true)"
     if [ -n "$log_reason" ]; then
       RUNTIME_MT5_OPEN_REASON="$log_reason"
@@ -3342,8 +3865,14 @@ runtime_open_mt5_on_display() {
     fi
     return 1
   fi
-  runtime_wait_and_rename_mt5_window "$target_display" 12 >/dev/null 2>&1 || true
-  runtime_mt5linux_start "$target_display"
+  runtime_wait_and_rename_mt5_window "$target_display" "$mt5file" "$title" 12 >/dev/null 2>&1 || true
+  target_desktop="$(runtime_mt5_target_desktop 2>/dev/null || true)"
+  if [ -n "$target_desktop" ]; then
+    runtime_wait_and_move_mt5_window_desktop "$target_display" "$target_desktop" "$mt5file" 12 >/dev/null 2>&1 || true
+  fi
+  if [ "$mode" != "host" ]; then
+    runtime_mt5linux_start "$target_display"
+  fi
   return 0
 }
 
@@ -3422,6 +3951,7 @@ runtime_open() {
   _print_cli_banner
   local requested_target=""
   local want_no_open=0
+  local open_host_mode=0
   local explicit_url=""
   local launch_display=""
   local x410_reason=""
@@ -3438,6 +3968,10 @@ runtime_open() {
       --no-open)
         want_no_open=1
         forwarded+=("--no-open")
+        ;;
+      --host)
+        open_host_mode=1
+        forwarded+=("--host")
         ;;
       --url)
         shift || true
@@ -3476,17 +4010,25 @@ runtime_open() {
       echo "ERR: runtime nao localizado: $runtime_name" >&2
       return 1
     fi
-    docker exec "$runtime_name" /usr/local/bin/dockermt container open "${forwarded[@]}"
+    DOCKERMT_ROUTED_EXPLICIT_TARGET=1 DOCKERMT_APP_DISPLAY="${DOCKERMT_APP_DISPLAY:-}" \
+      docker_exec_runtime_cli "$runtime_name" container open "${forwarded[@]}"
     return $?
   fi
-  local url
+  local url mt5_desktop
   url="${explicit_url:-$(runtime_web_url "$runtime_name")}"
   printf 'container: ativo
 '
   printf 'url: %s
 ' "$url"
+  if [ "$open_host_mode" = "1" ]; then
+    printf 'mt5-profile: host
+'
+  fi
   if [ "$want_no_open" = "1" ]; then
     return 0
+  fi
+  if [ "$open_host_mode" != "1" ]; then
+    runtime_sync_mt5_config_seed_for_current "$runtime_name" >/dev/null 2>&1 || true
   fi
   if ! launch_display="$(runtime_external_display 2>/dev/null)"; then
     x410_reason="DOCKERMT_APP_DISPLAY ausente no host"
@@ -3500,11 +4042,16 @@ runtime_open() {
 '
     return 1
   fi
-  if runtime_open_mt5_on_display "$launch_display"; then
+  if runtime_open_mt5_on_display "$launch_display" "$( [ "$open_host_mode" = "1" ] && printf 'host' || printf 'default' )"; then
     printf 'mt5: aberto no display externo.
 '
     printf 'mt5-display: %s
 ' "$launch_display"
+    mt5_desktop="$(runtime_mt5_target_desktop 2>/dev/null || true)"
+    if [ -n "$mt5_desktop" ]; then
+      printf 'mt5-desktop: %s
+' "$mt5_desktop"
+    fi
     return 0
   fi
   x410_reason="${RUNTIME_MT5_OPEN_REASON:-falha ao abrir MT5 no display externo}"
@@ -3705,6 +4252,7 @@ PY
 
 reset_target_workspace_from_zero() {
   local target_volume="${1:-}"
+  local source_volume="${2:-}"
   [ -n "$target_volume" ] || return 1
   ensure_factory_workspace_volume
   if ! factory_has_runtime_install >/dev/null 2>&1; then
@@ -3739,6 +4287,94 @@ reset_target_workspace_from_zero() {
         fi
       fi
     '
+  sync_target_mt5_config_from_source "$source_volume" "$target_volume"
+}
+
+sync_target_mt5_config_from_source() {
+  local source_volume="${1:-}"
+  local target_volume="${2:-}"
+  [ -n "$source_volume" ] || return 0
+  [ -n "$target_volume" ] || return 1
+  docker volume inspect "$source_volume" >/dev/null 2>&1 || return 0
+  docker run --rm \
+    -e "MT5_ROOT_REL=${DOCKERMT_MT5_ROOT_REL}" \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -v "${source_volume}:/seed:ro" \
+    -v "${target_volume}:/config" \
+    alpine sh -lc '
+      set -eu
+      src_cfg="/seed/${MT5_ROOT_REL}/Config"
+      dst_cfg="/config/${MT5_ROOT_REL}/Config"
+      [ -d "$src_cfg" ] || exit 0
+      mkdir -p "$dst_cfg"
+      find "$dst_cfg" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
+      cd "$src_cfg" && tar cf - . | (cd "$dst_cfg" && tar xf -)
+      chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "$dst_cfg" 2>/dev/null || true
+    '
+}
+
+volume_has_mt5_config_file() {
+  local target_volume="${1:-}"
+  local file_name="${2:-}"
+  [ -n "$target_volume" ] || return 1
+  [ -n "$file_name" ] || return 1
+  docker run --rm \
+    -e "MT5_ROOT_REL=${DOCKERMT_MT5_ROOT_REL}" \
+    -v "${target_volume}:/config:ro" \
+    alpine sh -lc "[ -f \"/config/\${MT5_ROOT_REL}/Config/${file_name}\" ]" >/dev/null 2>&1
+}
+
+volume_needs_mt5_config_seed() {
+  local source_volume="${1:-}"
+  local target_volume="${2:-}"
+  [ -n "$source_volume" ] || return 1
+  [ -n "$target_volume" ] || return 1
+  docker volume inspect "$source_volume" >/dev/null 2>&1 || return 1
+  if ! volume_has_mt5_config_file "$target_volume" "common.ini"; then
+    return 0
+  fi
+  if ! volume_has_mt5_config_file "$target_volume" "terminal.ini"; then
+    return 0
+  fi
+  if volume_has_mt5_config_file "$source_volume" "accounts.dat" && ! volume_has_mt5_config_file "$target_volume" "accounts.dat"; then
+    return 0
+  fi
+  return 1
+}
+
+ensure_mt5_config_seed_in_volume() {
+  local source_volume="${1:-}"
+  local target_volume="${2:-}"
+  local tries="${3:-8}"
+  [ -n "$source_volume" ] || return 0
+  [ -n "$target_volume" ] || return 0
+  while [ "$tries" -gt 0 ]; do
+    if ! volume_needs_mt5_config_seed "$source_volume" "$target_volume"; then
+      return 0
+    fi
+    sync_target_mt5_config_from_source "$source_volume" "$target_volume"
+    sleep 1
+    tries=$((tries - 1))
+  done
+  return 0
+}
+
+runtime_sync_mt5_config_seed_for_current() {
+  local current_name="${1:-}"
+  local source_container="" source_volume="" target_volume=""
+  [ -n "$current_name" ] || current_name="$(resolve_current_runtime_container)"
+  target_volume="$(current_container_config_volume "$current_name")"
+  [ -n "$target_volume" ] || return 0
+  source_container="$(runtime_parent_container "$current_name")"
+  if [ -z "$source_container" ] || [ "$source_container" = "$current_name" ]; then
+    return 0
+  fi
+  source_volume="$(current_container_config_volume "$source_container")"
+  [ -n "$source_volume" ] || return 0
+  if volume_needs_mt5_config_seed "$source_volume" "$target_volume"; then
+    sync_target_mt5_config_from_source "$source_volume" "$target_volume" >/dev/null 2>&1 || true
+  fi
 }
 
 copy_single_mql5_item_into_volume() {
@@ -3899,6 +4535,7 @@ runtime_spawn() {
   local raw_name=""
   local explicit_volume=""
   local explicit_snapshot=""
+  local selected_host_hash=""
   local selected_banner_color=""
   local selected_banner_text_color=""
   local selected_runtime_user=""
@@ -3926,6 +4563,13 @@ runtime_spawn() {
         ;;
       --snapshot=*)
         explicit_snapshot="${1#--snapshot=}"
+        ;;
+      --host-hash)
+        shift || true
+        selected_host_hash="${1:-}"
+        ;;
+      --host-hash=*)
+        selected_host_hash="${1#--host-hash=}"
         ;;
       --color)
         shift || true
@@ -4023,6 +4667,13 @@ runtime_spawn() {
     _instance_topic_usage create >&2
     return 1
   fi
+  if [ -n "$selected_host_hash" ]; then
+    selected_host_hash="$(normalize_mt5_host_hash "$selected_host_hash")"
+    if ! valid_mt5_host_hash "$selected_host_hash"; then
+      echo "ERR: --host-hash invalido: use 32 hexadecimais (Terminal/<HASH>)." >&2
+      return 1
+    fi
+  fi
   if [ "$selected_runtime_user_set" = "1" ] && [ -z "$selected_runtime_user" ]; then
     echo "ERR: informe um valor para --user (ex.: 0 ou 1000:1000)." >&2
     return 1
@@ -4036,7 +4687,19 @@ runtime_spawn() {
   fi
 
   local safe_name current_name target_container source_image source_volume target_volume target_state_volume
+  local codex_mount_source="" codex_mode_label="copy-auth" codex_mount_destination=""
+  local -a codex_mount_args=()
+  local host_mt5_mount_destination="${DOCKERMT_HOST_MT5_MOUNT}"
+  local host_mt5_source_path=""
+  local host_mt5_entries_fingerprint=""
+  local host_mt5_entry=""
+  local -a host_mt5_run_args=()
   local has_requested_imports=0
+  local existing_host_hash=""
+  local existing_host_source=""
+  local existing_host_layout=""
+  local existing_host_entries=""
+  local effective_host_hash=""
   local snapshot_id ports telnet_port web_port py_port runtime_status
   local created_target_volume=0
   local import_announced=0
@@ -4050,6 +4713,41 @@ runtime_spawn() {
   source_image="$(preferred_runtime_image "$current_name")"
   source_volume="$(current_container_config_volume "$current_name")"
   [ -n "$source_image" ] || { echo "ERR: nao foi possivel localizar a imagem do runtime atual." >&2; return 1; }
+  if [ -n "$selected_host_hash" ]; then
+    host_mt5_source_path="$(host_mt5_terminal_path_from_hash "$selected_host_hash")"
+    if ! docker_host_mt5_terminal_exists "$host_mt5_source_path"; then
+      echo "ERR: Terminal/${selected_host_hash} do host nao localizado em ${host_mt5_source_path}." >&2
+      echo "Confirme a pasta em ${DOCKERMT_HOST_MT5_TERMINAL_ROOT%/}/${selected_host_hash}/MQL5." >&2
+      return 1
+    fi
+    host_mt5_entries_fingerprint="$(host_mt5_entries_fingerprint "$host_mt5_source_path" 2>/dev/null || true)"
+    host_mt5_run_args=(
+      -e "DOCKERMT_HOST_MT5_HASH=$selected_host_hash"
+      -e "DOCKERMT_HOST_MT5_MOUNT=$host_mt5_mount_destination"
+      -e "DOCKERMT_HOST_MT5_ROOT_REL=$DOCKERMT_HOST_MT5_ROOT_REL"
+      -v "${host_mt5_source_path}:${host_mt5_mount_destination}:rw"
+      --label "dockermt.host-mt5.enabled=1"
+      --label "dockermt.host-mt5.hash=$selected_host_hash"
+      --label "dockermt.host-mt5.layout=$DOCKERMT_HOST_MT5_LAYOUT"
+      --label "dockermt.host-mt5.mount=$host_mt5_mount_destination"
+      --label "dockermt.host-mt5.entries=${host_mt5_entries_fingerprint:-none}"
+    )
+    while IFS= read -r host_mt5_entry; do
+      [ -n "$host_mt5_entry" ] || continue
+      host_mt5_run_args+=(
+        -v "${host_mt5_source_path}/${host_mt5_entry}:/config/${DOCKERMT_HOST_MT5_ROOT_REL}/${host_mt5_entry}:rw"
+      )
+    done <<EOF2
+$(host_mt5_data_entries "$host_mt5_source_path")
+EOF2
+    effective_host_hash="$selected_host_hash"
+  fi
+  codex_mount_destination="/config/.dockermt/codex/host-profile"
+  codex_mount_source="$(resolve_codex_host_mount_source 2>/dev/null || true)"
+  if [ -n "$codex_mount_source" ]; then
+    codex_mount_args=(-v "${codex_mount_source}:${codex_mount_destination}:ro")
+    codex_mode_label="hybrid-mount:${codex_mount_source}"
+  fi
 
   if [ -n "$explicit_snapshot" ]; then
     spawn_step "carregando snapshot..."
@@ -4115,7 +4813,7 @@ runtime_spawn() {
 
   if [ "$created_target_volume" = "1" ]; then
     spawn_step "limpando workspace..."
-    reset_target_workspace_from_zero "$target_volume"
+    reset_target_workspace_from_zero "$target_volume" "$source_volume"
     spawn_step "aplicando imports..."
     if [ "${#selected_indicators[@]}" -ne 0 ]; then
       if [ "$import_announced" -eq 0 ]; then
@@ -4175,24 +4873,70 @@ runtime_spawn() {
   spawn_step "sincronizando recursos..."
   sync_codex_docs_into_volume "$target_volume"
   sync_codex_auth_into_volume "$target_volume"
+  if [ -n "$codex_mount_source" ]; then
+    sync_codex_profile_into_volume "$target_volume" "$codex_mount_source"
+  fi
 
   docker volume inspect "$target_state_volume" >/dev/null 2>&1 || docker volume create "$target_state_volume" >/dev/null
 
   if container_exists "$target_container"; then
+    local existing_runtime_user recreate_instance_container=0
+    existing_runtime_user="$(container_user_value "$target_container")"
     if [ -n "$selected_runtime_user" ]; then
       echo "[dockermt] aviso: instancia ja existe; --user so vale na primeira criacao do container."
     fi
-    runtime_status="$(current_container_status "$target_container")"
-    if [ "$runtime_status" != "running" ]; then
-      spawn_step "subindo..."
-      docker start "$target_container" >/dev/null
+    if [ -n "$existing_runtime_user" ]; then
+      runtime_user_args=(--user "$existing_runtime_user")
+    else
+      runtime_user_args=()
     fi
-  else
-    spawn_step "alocando portas..."
-    ports="$(allocate_instance_ports)" || { echo "ERR: nao foi possivel reservar portas livres para a nova instancia." >&2; return 1; }
-    IFS='|' read -r telnet_port web_port py_port <<EOF2
+    if [ -n "$codex_mount_source" ] && ! container_has_mount_destination "$target_container" "$codex_mount_destination"; then
+      echo "[dockermt] aviso: espelho do Codex nao esta ativo nesta instancia existente."
+      echo "[dockermt] aviso: recrie a instancia para aplicar o bind mount do host."
+      codex_mode_label="copy-auth"
+    fi
+    existing_host_hash="$(runtime_container_label "$target_container" "dockermt.host-mt5.hash")"
+    if [ -z "$existing_host_hash" ]; then
+      existing_host_hash="$(container_env_value "$target_container" "DOCKERMT_HOST_MT5_HASH")"
+    fi
+    existing_host_layout="$(runtime_container_label "$target_container" "dockermt.host-mt5.layout")"
+    existing_host_entries="$(runtime_container_label "$target_container" "dockermt.host-mt5.entries")"
+    if [ -z "$effective_host_hash" ] && [ -n "$existing_host_hash" ]; then
+      effective_host_hash="$existing_host_hash"
+    fi
+    if [ -n "$selected_host_hash" ]; then
+      existing_host_source="$(container_mount_source_for_destination "$target_container" "$host_mt5_mount_destination")"
+      if [ "$existing_host_hash" != "$selected_host_hash" ] \
+        || [ "$existing_host_source" != "$host_mt5_source_path" ] \
+        || [ "$existing_host_layout" != "$DOCKERMT_HOST_MT5_LAYOUT" ] \
+        || [ "$existing_host_entries" != "${host_mt5_entries_fingerprint:-none}" ]; then
+        recreate_instance_container=1
+      fi
+    fi
+    if [ "$recreate_instance_container" = "1" ]; then
+      spawn_step "recriando container..."
+      telnet_port="$(container_host_port "$target_container" "1122" "")"
+      web_port="$(container_host_port "$target_container" "3000" "")"
+      py_port="$(container_host_port "$target_container" "8001" "")"
+      docker rm -f "$target_container" >/dev/null
+    fi
+  fi
+
+  if ! container_exists "$target_container"; then
+    if [ -n "$selected_host_hash" ]; then
+      spawn_step "preparando runtime host..."
+      prepare_host_mt5_runtime_in_volume "$target_volume" refresh || {
+        echo "ERR: falha ao preparar o runtime portable do host no volume da instancia." >&2
+        return 1
+      }
+    fi
+    if [ -z "${telnet_port:-}" ] || [ -z "${web_port:-}" ] || [ -z "${py_port:-}" ]; then
+      spawn_step "alocando portas..."
+      ports="$(allocate_instance_ports)" || { echo "ERR: nao foi possivel reservar portas livres para a nova instancia." >&2; return 1; }
+      IFS='|' read -r telnet_port web_port py_port <<EOF2
 $ports
 EOF2
+    fi
     spawn_step "criando container..."
     docker run -d \
       --name "$target_container" \
@@ -4215,6 +4959,8 @@ EOF2
       -e "DOCKERMT_DOCKER_SOCKET_PATH=$DOCKER_SOCKET_PATH" \
       -v "${target_volume}:/config" \
       -v "${DOCKER_SOCKET_PATH}:${DOCKER_SOCKET_PATH}" \
+      "${codex_mount_args[@]}" \
+      "${host_mt5_run_args[@]}" \
       -p "${telnet_port}:1122" \
       -p "${web_port}:3000" \
       -p "${py_port}:8001" \
@@ -4228,13 +4974,21 @@ EOF2
       --label "dockermt.runtime.parent=$current_name" \
       --label "dockermt.runtime.config-volume=$target_volume" \
       "$source_image" >/dev/null
+  else
+    runtime_status="$(current_container_status "$target_container")"
+    if [ "$runtime_status" != "running" ]; then
+      spawn_step "subindo..."
+      docker start "$target_container" >/dev/null
+    fi
   fi
 
   spawn_step "atualizando runtime..."
   local runtime_src_dockermt="/usr/local/bin/dockermt"
   local runtime_src_shell="/usr/local/bin/dockermt-instance-shell"
   local runtime_src_args="/opt/dockermt-full/dist/lib/args.js"
+  local runtime_src_config="/opt/dockermt-full/dist/lib/config.js"
   local runtime_src_dispatch="/opt/dockermt-full/dist/lib/dispatch.js"
+  local runtime_src_tester="/opt/dockermt-full/dist/lib/tester.js"
   if [ -f /config/.dockermt/patches/runtime/dockermt ]; then
     runtime_src_dockermt="/config/.dockermt/patches/runtime/dockermt"
   fi
@@ -4244,8 +4998,14 @@ EOF2
   if [ -f /config/.dockermt/patches/runtime/args.js ]; then
     runtime_src_args="/config/.dockermt/patches/runtime/args.js"
   fi
+  if [ -f /config/.dockermt/patches/runtime/config.js ]; then
+    runtime_src_config="/config/.dockermt/patches/runtime/config.js"
+  fi
   if [ -f /config/.dockermt/patches/runtime/dispatch.js ]; then
     runtime_src_dispatch="/config/.dockermt/patches/runtime/dispatch.js"
+  fi
+  if [ -f /config/.dockermt/patches/runtime/tester.js ]; then
+    runtime_src_tester="/config/.dockermt/patches/runtime/tester.js"
   fi
   docker cp "$runtime_src_dockermt" "${target_container}:/usr/local/bin/dockermt"
   if [ -f "$runtime_src_shell" ]; then
@@ -4254,8 +5014,14 @@ EOF2
   if [ -f "$runtime_src_args" ]; then
     docker cp "$runtime_src_args" "${target_container}:/opt/dockermt-full/dist/lib/args.js"
   fi
+  if [ -f "$runtime_src_config" ]; then
+    docker cp "$runtime_src_config" "${target_container}:/opt/dockermt-full/dist/lib/config.js"
+  fi
   if [ -f "$runtime_src_dispatch" ]; then
     docker cp "$runtime_src_dispatch" "${target_container}:/opt/dockermt-full/dist/lib/dispatch.js"
+  fi
+  if [ -f "$runtime_src_tester" ]; then
+    docker cp "$runtime_src_tester" "${target_container}:/opt/dockermt-full/dist/lib/tester.js"
   fi
   docker exec "$target_container" sh -lc 'chmod 755 /usr/local/bin/dockermt /usr/local/bin/dockermt-instance-shell 2>/dev/null || true'
 
@@ -4268,9 +5034,18 @@ EOF2
   record_project_import_batch "$target_container" "Scripts" "${selected_scripts[@]}"
   record_project_import_batch "$target_container" "Files" "${selected_files[@]}"
 
+  if [ -n "$source_volume" ] && { [ "$created_target_volume" = "1" ] || volume_needs_mt5_config_seed "$source_volume" "$target_volume"; }; then
+    spawn_step "sincronizando config MT5..."
+    sync_target_mt5_config_from_source "$source_volume" "$target_volume"
+  fi
+
   if [ "$created_target_volume" = "1" ] || [ -n "$selected_banner_color" ] || [ -n "$selected_banner_text_color" ]; then
     spawn_step "aplicando tema..."
     assign_instance_banner_theme "$target_volume" "$safe_name" "$(current_container_image "$target_container")" "$selected_banner_color" "$selected_banner_text_color"
+  fi
+  if [ -n "$source_volume" ]; then
+    spawn_step "revalidando config MT5..."
+    ensure_mt5_config_seed_in_volume "$source_volume" "$target_volume" 8
   fi
   spawn_step "finalizando..."
   rename_instance_mt5_window_in_container "$target_container" ":1" "$safe_name" >/dev/null 2>&1 || true
@@ -4285,6 +5060,7 @@ workspace    : $( [ "$created_target_volume" = "1" ] && printf 'factory' || prin
 imports      : $( [ -n "$imports_summary" ] && printf '%s' "$imports_summary" || printf 'nenhum' )
 project      : /config/.dockermt/codex/session/project
 projects     : dockermt @$safe_name project
+codex       : $codex_mode_label
 url          : $(runtime_web_url "$target_container")
 telnet       : $(container_host_port "$target_container" "1122" "-")
 python       : $(container_host_port "$target_container" "8001" "-")
@@ -4292,12 +5068,22 @@ theme        : $( [ -n "$selected_banner_color" ] && printf '%s/%s' "$selected_b
 prompt       : dockermt @$safe_name ...
 shell        : dockermt @$safe_name shell
 open         : dockermt @$safe_name container open
+open-host    : $( [ -n "$effective_host_hash" ] && printf 'dockermt @%s container open --host' "$safe_name" || printf 'nao configurado' )
 status       : dockermt @$safe_name container status
+host-hash    : $( [ -n "$effective_host_hash" ] && printf '%s' "$effective_host_hash" || printf 'nenhum' )
 EOF2
 
-  (
-    docker exec "$target_container" /usr/local/bin/dockermt container open >/dev/null 2>&1 || true
-  ) &
+  if [ -n "$selected_host_hash" ]; then
+    spawn_step "abrindo MT5 host..."
+    if ! DOCKERMT_ROUTED_EXPLICIT_TARGET=1 docker_exec_runtime_cli "$target_container" container open --host >/dev/null 2>&1; then
+      echo "[dockermt] aviso: o segundo MT5 host-backed foi configurado, mas a abertura automatica falhou."
+      echo "[dockermt] aviso: tente manualmente: dockermt @$safe_name container open --host"
+    fi
+  elif [ "${DOCKERMT_INSTANCE_AUTO_OPEN:-0}" = "1" ]; then
+    (
+      DOCKERMT_ROUTED_EXPLICIT_TARGET=1 docker_exec_runtime_cli "$target_container" container open >/dev/null 2>&1 || true
+    ) &
+  fi
 }
 
 runtime_import_named() {

@@ -1249,7 +1249,8 @@ export async function runTesterInContainer(spec, tester, container) {
     dockerExecSh(dockerDir, serviceName, "wineserver -k >/dev/null 2>&1 || true; sleep 1", {
         user: wineUser || undefined
     });
-    const runCmd = `wine ${shQuote(terminalWin)} /portable ${shQuote(configArg)}`;
+    const portableArg = mt5DataRootContainer === mt5InstallRootContainer ? " /portable" : "";
+    const runCmd = `wine ${shQuote(terminalWin)}${portableArg} ${shQuote(configArg)}`;
     const launchCmd = runCmd + ` >/tmp/cmdmt-tester-${runId}.log 2>&1 & echo started`;
     const execArgs = ["exec", "-T"];
     if (wineUser)

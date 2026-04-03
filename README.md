@@ -230,3 +230,5 @@ Cobertura do teste:
 - `dockermt @nome container open` no host
 - `dockermt @nome container open` dentro da instancia
 - bloqueio esperado de `dockermt container open` sem `@` dentro da instancia
+- presenca de `Config/common.ini` e `Config/terminal.ini` na instancia
+- presenca de `Config/accounts.dat` na instancia quando existir no central
