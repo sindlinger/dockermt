@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# DockerMT CLI policy:
+# - o usuario deve precisar digitar so o que quer fazer;
+# - parametros extras devem ser opcionais;
+# - symbol, timeframe, template base, chart alvo e afins devem ter defaults robustos;
+# - nao reintroduzir comandos que exijam parametros obrigatorios sem motivo tecnico forte.
 set -euo pipefail
 
 HOST="${TELNETMT_HOST:-127.0.0.1}"
@@ -6,7 +11,5019 @@ PORT="${TELNETMT_PORT:-1122}"
 WEB_PORT="${MT5_WEB_PORT:-3000}"
 PY_PORT="${MT5_PY_PORT:-8001}"
 TIMEOUT_SEC="${DOCKERMT_TIMEOUT_SEC:-5}"
-CMD="${1:-}"
+CMD=""
+DEFAULT_CONTAINER_FALLBACK="${DOCKERMT_CONTAINER_NAME:-dockermt}"
+SNAPSHOT_REPO="${DOCKERMT_SNAPSHOT_REPO:-dockermt}"
+SNAPSHOT_VOLUME_PREFIX="${DOCKERMT_SNAPSHOT_VOLUME_PREFIX:-dockermt}"
+PULL_REPO="${DOCKERMT_PULL_REPO:-sindlinger/dockermt}"
+SNAPSHOT_BUNDLE_PATH="${DOCKERMT_SNAPSHOT_BUNDLE_PATH:-/usr/local/share/dockermt/linked-config.tar}"
+STATE_VOLUME="${DOCKERMT_STATE_VOLUME:-dockermt_state}"
+STATE_SELECTED_FILE="${DOCKERMT_STATE_SELECTED_FILE:-selected-snapshot-id.txt}"
+DOCKER_SOCKET_PATH="${DOCKERMT_DOCKER_SOCKET_PATH:-/var/run/docker.sock}"
+DOCKERMT_VERSION_FILE="${DOCKERMT_VERSION_FILE:-/opt/dockermt/VERSION}"
+DOCKERMT_CONFIG_FILE="${DOCKERMT_CONFIG_FILE:-${HOME:-/config}/.dockermt/config.json}"
+MAX_SNAPSHOTS_PER_NAME="${DOCKERMT_MAX_SNAPSHOTS_PER_NAME:-1}"
+PRIVATE_REPO_PATH="${DOCKERMT_PRIVATE_REPO_PATH:-/config/private/cli-duka-account}"
+DUKASCOPY_SCRIPT_PATH="${DOCKERMT_DUKASCOPY_SCRIPT_PATH:-${PRIVATE_REPO_PATH}/cli-demo-account.mjs}"
+DUKASCOPY_STATE_DIR="${DOCKERMT_DUKASCOPY_STATE_DIR:-/config/dockermt/dukascopy}"
+DUKASCOPY_STATE_FILE="${DOCKERMT_DUKASCOPY_STATE_FILE:-${DUKASCOPY_STATE_DIR}/latest-sync.json}"
+DUKASCOPY_ENV_FILE="${DOCKERMT_DUKASCOPY_ENV_FILE:-${DUKASCOPY_STATE_DIR}/selected.env}"
+MT5_COMMON_INI_PATH="${DOCKERMT_MT5_COMMON_INI_PATH:-/config/.wine/drive_c/Program Files/MetaTrader 5/Config/common.ini}"
+DOCKERMT_WORKSPACE_FACTORY_VOLUME="${DOCKERMT_WORKSPACE_FACTORY_VOLUME:-${DOCKERMT_WORKSPACE_ZERO_VOLUME:-dockermt-workspace-factory-20260331}}"
+DOCKERMT_WORKSPACE_ZERO_VOLUME="${DOCKERMT_WORKSPACE_FACTORY_VOLUME}"
+DOCKERMT_MT5_ROOT_REL="${DOCKERMT_MT5_ROOT_REL:-.wine/drive_c/Program Files/MetaTrader 5}"
+DOCKERMT_MQL5_ROOT_REL="${DOCKERMT_MQL5_ROOT_REL:-${DOCKERMT_MT5_ROOT_REL}/MQL5}"
+DOCKERMT_RUNTIME_UID="${DOCKERMT_RUNTIME_UID:-911}"
+DOCKERMT_RUNTIME_GID="${DOCKERMT_RUNTIME_GID:-911}"
+DOCKERMT_CODEX_DOCS_SOURCE="${DOCKERMT_CODEX_DOCS_SOURCE:-/mnt/c/mql/docs}"
+DOCKERMT_CODEX_AUTH_SOURCE="${DOCKERMT_CODEX_AUTH_SOURCE:-/home/chanfle/.codex}"
+DOCKERMT_CODEX_HOME_REL="${DOCKERMT_CODEX_HOME_REL:-.dockermt/codex/home}"
+DOCKERMT_CODEX_SESSION_REL="${DOCKERMT_CODEX_SESSION_REL:-.dockermt/codex/session}"
+DOCKERMT_EXTENSIONS_REL="${DOCKERMT_EXTENSIONS_REL:-.dockermt/extensions}"
+DOCKERMT_EXTENSION_COMMANDS_REL="${DOCKERMT_EXTENSION_COMMANDS_REL:-${DOCKERMT_EXTENSIONS_REL}/commands}"
+DOCKERMT_CODEX_DOCS_REL="${DOCKERMT_CODEX_DOCS_REL:-.dockermt/docs/mql}"
+DOCKERMT_PROJECTS_REGISTRY_DIR="${DOCKERMT_PROJECTS_REGISTRY_DIR:-/config/.dockermt/projects}"
+DOCKERMT_PROJECTS_NETWORK_FILE="${DOCKERMT_PROJECTS_NETWORK_FILE:-${DOCKERMT_PROJECTS_REGISTRY_DIR}/network-index.json}"
+DOCKERMT_PROJECTS_NETWORK_EVENTS_FILE="${DOCKERMT_PROJECTS_NETWORK_EVENTS_FILE:-${DOCKERMT_PROJECTS_REGISTRY_DIR}/network-events.ndjson}"
+RUNTIME_MT5_OPEN_REASON=""
+
+_resolve_runtime_version() {
+  if [ -f "$DOCKERMT_VERSION_FILE" ]; then
+    local version
+    version="$(tr -d '\r' < "$DOCKERMT_VERSION_FILE" | sed -n '1p')"
+    if [ -n "$version" ]; then
+      printf '%s\n' "$version"
+      return 0
+    fi
+  fi
+  if [ -n "${DOCKERMT_VERSION:-}" ]; then
+    printf '%s\n' "$DOCKERMT_VERSION"
+    return 0
+  fi
+  printf 'dev\n'
+}
+
+DOCKERMT_VERSION_CURRENT="$(_resolve_runtime_version)"
+CMDMT_VERSION_CURRENT="${CMDMT_VERSION_CURRENT:-$DOCKERMT_VERSION_CURRENT}"
+
+_resolve_banner_color_name() {
+  if [ -n "${DOCKERMT_BANNER_COLOR:-}" ]; then
+    printf '%s\n' "${DOCKERMT_BANNER_COLOR}"
+    return 0
+  fi
+  if [ -f "$DOCKERMT_CONFIG_FILE" ] && command -v python3 >/dev/null 2>&1; then
+    local resolved
+    resolved="$(python3 - "$DOCKERMT_CONFIG_FILE" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path, 'r', encoding='utf-8') as fh:
+        obj = json.load(fh)
+    ui = obj.get('ui') if isinstance(obj, dict) else None
+    val = ui.get('bannerColor') if isinstance(ui, dict) else None
+    if isinstance(val, str) and val.strip():
+        print(val.strip())
+except Exception:
+    pass
+PY
+)"
+    if [ -n "$resolved" ]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+  printf 'yellow\n'
+}
+
+_resolve_banner_text_color_name() {
+  if [ -n "${DOCKERMT_BANNER_TEXT_COLOR:-}" ]; then
+    printf '%s\n' "${DOCKERMT_BANNER_TEXT_COLOR}"
+    return 0
+  fi
+  if [ -f "$DOCKERMT_CONFIG_FILE" ] && command -v python3 >/dev/null 2>&1; then
+    local resolved
+    resolved="$(python3 - "$DOCKERMT_CONFIG_FILE" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path, 'r', encoding='utf-8') as fh:
+        obj = json.load(fh)
+    ui = obj.get('ui') if isinstance(obj, dict) else None
+    val = ui.get('bannerTextColor') if isinstance(ui, dict) else None
+    if isinstance(val, str) and val.strip():
+        print(val.strip())
+except Exception:
+    pass
+PY
+)"
+    if [ -n "$resolved" ]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+  printf '\n'
+}
+
+_resolve_cmd_color_name() {
+  if [ -n "${DOCKERMT_CMD_COLOR:-}" ]; then
+    printf '%s\n' "${DOCKERMT_CMD_COLOR}"
+    return 0
+  fi
+  if [ -f "$DOCKERMT_CONFIG_FILE" ] && command -v python3 >/dev/null 2>&1; then
+    local resolved
+    resolved="$(python3 - "$DOCKERMT_CONFIG_FILE" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path, 'r', encoding='utf-8') as fh:
+        obj = json.load(fh)
+    ui = obj.get('ui') if isinstance(obj, dict) else None
+    val = ui.get('commandColor') if isinstance(ui, dict) else None
+    if isinstance(val, str) and val.strip():
+        print(val.strip())
+except Exception:
+    pass
+PY
+)"
+    if [ -n "$resolved" ]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+  printf '\n'
+}
+
+_resolve_cmd_color_escape() {
+  local chosen
+  chosen="$(_resolve_cmd_color_name)"
+  if [ -z "$chosen" ]; then
+    chosen="$(_resolve_banner_color_name)"
+  fi
+  case "$chosen" in
+    yellow)
+      printf '\033[38;5;214m'
+      ;;
+    blue)
+      printf '\033[38;5;117m'
+      ;;
+    soft-blue)
+      printf '\033[38;5;111m'
+      ;;
+    cyan)
+      printf '\033[38;5;45m'
+      ;;
+    green)
+      printf '\033[38;5;84m'
+      ;;
+    magenta)
+      printf '\033[38;5;213m'
+      ;;
+    red)
+      printf '\033[38;5;210m'
+      ;;
+    gray|grey)
+      printf '\033[38;5;240m'
+      ;;
+    silver)
+      printf '\033[38;5;250m'
+      ;;
+    white|bright-white)
+      printf '\033[97m'
+      ;;
+    gold)
+      printf '\033[38;5;221m'
+      ;;
+    amber)
+      printf '\033[38;5;214m'
+      ;;
+    *)
+      printf '\033[36m'
+      ;;
+  esac
+}
+
+if [ "${NO_COLOR:-}" != "1" ] && { [ -t 1 ] || [ "${DOCKERMT_FORCE_COLOR:-}" = "1" ] || [ "${CLICOLOR_FORCE:-}" = "1" ] || { [ -n "${TERM:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; }; }; then
+  CLR_CMD="$(_resolve_cmd_color_escape)"
+  CLR_HDR="$(printf '\033[1m')"
+  CLR_DIM="$(printf '\033[2m')"
+  CLR_RST="$(printf '\033[0m')"
+  case "$(_resolve_banner_color_name)" in
+    yellow)
+      CLR_BANNER_BG="$(printf '\033[43m')"
+      CLR_BANNER_FG="$(printf '\033[30m')"
+      ;;
+    blue)
+      CLR_BANNER_BG="$(printf '\033[44m')"
+      CLR_BANNER_FG="$(printf '\033[97m')"
+      ;;
+    cyan)
+      CLR_BANNER_BG="$(printf '\033[46m')"
+      CLR_BANNER_FG="$(printf '\033[30m')"
+      ;;
+    green)
+      CLR_BANNER_BG="$(printf '\033[42m')"
+      CLR_BANNER_FG="$(printf '\033[30m')"
+      ;;
+    magenta)
+      CLR_BANNER_BG="$(printf '\033[45m')"
+      CLR_BANNER_FG="$(printf '\033[97m')"
+      ;;
+    red)
+      CLR_BANNER_BG="$(printf '\033[41m')"
+      CLR_BANNER_FG="$(printf '\033[97m')"
+      ;;
+    gray|grey)
+      CLR_BANNER_BG="$(printf '\033[47m')"
+      CLR_BANNER_FG="$(printf '\033[30m')"
+      ;;
+    *)
+      CLR_BANNER_BG="$(printf '\033[43m')"
+      CLR_BANNER_FG="$(printf '\033[30m')"
+      ;;
+  esac
+  case "$(_resolve_banner_text_color_name)" in
+    black)
+      CLR_BANNER_FG="$(printf '\033[30m')"
+      ;;
+    red)
+      CLR_BANNER_FG="$(printf '\033[31m')"
+      ;;
+    green)
+      CLR_BANNER_FG="$(printf '\033[32m')"
+      ;;
+    yellow)
+      CLR_BANNER_FG="$(printf '\033[33m')"
+      ;;
+    blue)
+      CLR_BANNER_FG="$(printf '\033[34m')"
+      ;;
+    magenta)
+      CLR_BANNER_FG="$(printf '\033[35m')"
+      ;;
+    cyan)
+      CLR_BANNER_FG="$(printf '\033[36m')"
+      ;;
+    gray|grey)
+      CLR_BANNER_FG="$(printf '\033[90m')"
+      ;;
+    white|bright-white)
+      CLR_BANNER_FG="$(printf '\033[97m')"
+      ;;
+    gold)
+      CLR_BANNER_FG="$(printf '\033[38;5;221m')"
+      ;;
+    amber)
+      CLR_BANNER_FG="$(printf '\033[38;5;214m')"
+      ;;
+  esac
+else
+  CLR_CMD=""
+  CLR_HDR=""
+  CLR_DIM=""
+  CLR_RST=""
+  CLR_BANNER_BG=""
+  CLR_BANNER_FG=""
+fi
+
+_print_banner_line() {
+  local text="$1"
+  local width content pad_count
+  content=" ${text} "
+  width="${COLUMNS:-}"
+  if ! printf '%s' "$width" | grep -Eq '^[0-9]+$'; then
+    width=""
+  fi
+  if [ -z "$width" ] && command -v tput >/dev/null 2>&1; then
+    width="$(tput cols 2>/dev/null || true)"
+    if ! printf '%s' "$width" | grep -Eq '^[0-9]+$'; then
+      width=""
+    fi
+  fi
+  if [ -z "$width" ] || [ "$width" -lt 20 ]; then
+    width=80
+  fi
+  pad_count=$(( width - ${#content} ))
+  if [ "$pad_count" -gt 0 ]; then
+    content="${content}$(printf '%*s' "$pad_count" '')"
+  fi
+  if [ -n "$CLR_BANNER_BG" ]; then
+    printf '%b\n' "${CLR_BANNER_BG}${CLR_BANNER_FG}${content}${CLR_RST}"
+  else
+    printf '%s\n' "$content"
+  fi
+}
+
+_print_cli_banner() {
+  _print_banner_line "DockerMT • dockermt v${DOCKERMT_VERSION_CURRENT}"
+  _print_banner_line "Socket: ${HOST}:${PORT}"
+}
+
+_list_extension_command_names() {
+  local dir="/config/${DOCKERMT_EXTENSION_COMMANDS_REL}"
+  [ -d "$dir" ] || return 0
+  find "$dir" -maxdepth 1 -type f \( -name '*.sh' -o -name '*.py' -o -name '*.js' \) 2>/dev/null \
+    | sed 's#.*/##; s/\.[^.]*$//' \
+    | sort -u \
+    | grep -Ev '^(help|version|instance|whoami|shell|import|project|map|ping|install|dukascopy|container|gpu|compile|editor|add|rm|inspect|debug|trace|log|config|chart|template|expert|tester|hotkey|script|trade|global|input|snapshot|object|screen|addons|quit)$' || true
+}
+
+_extension_command_path() {
+  local name="${1:-}"
+  local dir="/config/${DOCKERMT_EXTENSION_COMMANDS_REL}"
+  [ -n "$name" ] || return 1
+  [ -d "$dir" ] || return 1
+  for candidate in "$dir/$name.sh" "$dir/$name.py" "$dir/$name.js" "$dir/$name"; do
+    [ -f "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+_run_extension_command() {
+  local name="${1:-}"
+  shift || true
+  local ext_path
+  ext_path="$(_extension_command_path "$name" 2>/dev/null || true)"
+  [ -n "$ext_path" ] || return 1
+  case "$ext_path" in
+    *.sh|"")
+      DOCKERMT_EXTENSION_NAME="$name" DOCKERMT_EXTENSION_PATH="$ext_path" bash "$ext_path" "$@"
+      ;;
+    *.py)
+      DOCKERMT_EXTENSION_NAME="$name" DOCKERMT_EXTENSION_PATH="$ext_path" python3 "$ext_path" "$@"
+      ;;
+    *.js)
+      DOCKERMT_EXTENSION_NAME="$name" DOCKERMT_EXTENSION_PATH="$ext_path" node "$ext_path" "$@"
+      ;;
+    *)
+      DOCKERMT_EXTENSION_NAME="$name" DOCKERMT_EXTENSION_PATH="$ext_path" "$ext_path" "$@"
+      ;;
+  esac
+}
+
+_usage() {
+  _print_cli_banner
+  cat <<USAGE
+${CLR_HDR}dockermt v${DOCKERMT_VERSION_CURRENT}${CLR_RST}
+CLI container-only para runtime MT5, automacao via socket e snapshots Docker.
+
+${CLR_HDR}Principle:${CLR_RST}
+  Para conforto do usuario, o CLI deve resolver automaticamente tudo o que puder.
+  O usuario deve pedir apenas o que quer; o restante e responsabilidade do CLI.
+  Symbol, timeframe, chart alvo, projeto, caminho, template base e alvo atual devem ser inferidos
+  antes de exigir digitacao adicional.
+  Parametros extras so permanecem obrigatorios quando forem estruturais e nao houver inferencia segura.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt${CLR_RST} <COMMAND> [ARGS...]
+  ${CLR_CMD}dockermt @INSTANCIA${CLR_RST} <COMMAND> [ARGS...]
+  ${CLR_CMD}dockermt help${CLR_RST} <COMMAND> [SUBCOMMAND]
+
+  ${CLR_HDR}Commands:${CLR_RST}
+  ${CLR_HDR}Runtime${CLR_RST}
+    ${CLR_CMD}help${CLR_RST}       Mostra a ajuda geral ou de um topico especifico.
+    ${CLR_CMD}container${CLR_RST}  Gerencia runtime atual e snapshots Docker.
+    ${CLR_CMD}shell${CLR_RST}      Abre shell interativo do runtime central.
+    ${CLR_CMD}instance${CLR_RST}   Gerencia instancias (create/list/factory) e nome local da instancia.
+    ${CLR_CMD}project${CLR_RST}    Lista projetos Git e consulta o registro em rede central/instancias.
+    ${CLR_CMD}import${CLR_RST}     Copia indicadores, experts e services da base atual para uma instancia.
+    ${CLR_CMD}map${CLR_RST}        Mostra portas, caminhos e recursos importantes do container.
+    ${CLR_CMD}ping${CLR_RST}       Testa a conectividade com o socket TelnetMT.
+    ${CLR_CMD}log${CLR_RST}        Consulta logs recentes do runtime.
+    ${CLR_CMD}install${CLR_RST}    Gera o bootstrap curto do host para chamar o DockerMT central.
+    ${CLR_CMD}dukascopy${CLR_RST}  Sincroniza credenciais demo a partir do repo privado.
+    ${CLR_CMD}gpu${CLR_RST}        Usa o Python GPU do container com CuPy.
+  ${CLR_HDR}MT5${CLR_RST}
+    ${CLR_CMD}config${CLR_RST}     Abre a UI de configuracao do runtime.
+    ${CLR_CMD}chart${CLR_RST}      Opera graficos abertos e sua disposicao.
+    ${CLR_CMD}add${CLR_RST}        Anexa indicador ou expert ao grafico atual.
+    ${CLR_CMD}rm${CLR_RST}         Remove indicador ou expert do grafico atual.
+    ${CLR_CMD}compile${CLR_RST}    Compila codigo MQL5 no terminal conectado.
+    ${CLR_CMD}editor${CLR_RST}     Abre o MetaEditor e controla runs de debug do editor.
+    ${CLR_CMD}template${CLR_RST}   Aplica e salva templates do MT5.
+    ${CLR_CMD}expert${CLR_RST}     Busca e anexa experts.
+    ${CLR_CMD}tester${CLR_RST}     Encaminha operacoes para o Strategy Tester.
+    ${CLR_CMD}script${CLR_RST}     Executa scripts MQL5.
+    ${CLR_CMD}object${CLR_RST}     Lista e manipula objetos graficos.
+    ${CLR_CMD}screen${CLR_RST}     Captura e gerencia screenshots.
+    ${CLR_CMD}hotkey${CLR_RST}     Lista e gerencia hotkeys do runtime.
+    ${CLR_CMD}trade${CLR_RST}      Envia operacoes de trade.
+    ${CLR_CMD}global${CLR_RST}     Gerencia Global Variables do terminal.
+    ${CLR_CMD}input${CLR_RST}      Lista inputs expostos pelo alvo atual.
+    ${CLR_CMD}snapshot${CLR_RST}   Gerencia snapshots do lado MT5/terminal.
+  ${CLR_HDR}Debug${CLR_RST}
+    ${CLR_CMD}inspect${CLR_RST}    Inspeciona indicadores e experts carregados.
+    ${CLR_CMD}debug${CLR_RST}      Emite mensagens e diagnosticos.
+    ${CLR_CMD}trace${CLR_RST}      Le traces estruturados NDJSON emitidos pelo codigo MQL5.
+    ${CLR_CMD}quit${CLR_RST}       Encerra a sessao interativa da CLI.
+
+$(exts="$(_list_extension_command_names || true)"; if [ -n "$exts" ]; then
+    printf '%b\n' "${CLR_HDR}Instance extensions:${CLR_RST}"
+    printf '%s\n' "$exts" | while IFS= read -r ext; do
+      [ -n "$ext" ] || continue
+      printf '  %b%s%b  Comando local desta instancia.\n' "$CLR_CMD" "$ext" "$CLR_RST"
+    done
+  fi)
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container${CLR_RST}
+  ${CLR_CMD}dockermt shell${CLR_RST}
+  ${CLR_CMD}dockermt instance${CLR_RST}
+  ${CLR_CMD}dockermt instance create onnxlab${CLR_RST}
+  ${CLR_CMD}dockermt instance list${CLR_RST}
+  ${CLR_CMD}dockermt @onnxlab shell${CLR_RST}
+  ${CLR_CMD}dockermt @onnxlab import --indicator DukaTickDll${CLR_RST}
+  ${CLR_CMD}dockermt compile${CLR_RST}
+  ${CLR_CMD}dockermt chart${CLR_RST}
+  ${CLR_CMD}dockermt add -i${CLR_RST}
+  ${CLR_CMD}dockermt editor debug -i${CLR_RST}
+  ${CLR_CMD}dockermt trace${CLR_RST}
+  ${CLR_CMD}dockermt trade${CLR_RST}
+  ${CLR_CMD}dockermt gpu test${CLR_RST}
+  ${CLR_CMD}dockermt help instance create${CLR_RST}
+
+${CLR_DIM}Este runtime e container-only: nao grava shims e nao depende de arquivos do host.${CLR_RST}
+USAGE
+}
+
+_container_usage() {
+  _print_cli_banner
+  cat <<USAGE
+${CLR_HDR}dockermt container${CLR_RST}
+Opera o runtime atual e o historico de snapshots vinculados ao volume.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container${CLR_RST}
+  ${CLR_CMD}dockermt container${CLR_RST} <COMMAND> [ARGS...]
+  ${CLR_CMD}dockermt help container${CLR_RST} <COMMAND>
+
+${CLR_HDR}Commands:${CLR_RST}
+  ${CLR_HDR}Runtime atual${CLR_RST}
+    ${CLR_CMD}status${CLR_RST}     Mostra runtime atual, imagem atual e URL atual.
+    ${CLR_CMD}up${CLR_RST}         Recria ou sobe o runtime atual.
+    ${CLR_CMD}open${CLR_RST}       Abre o MetaTrader do runtime atual e informa a URL publicada.
+  ${CLR_HDR}Snapshots Docker${CLR_RST}
+    ${CLR_CMD}list${CLR_RST}       Lista snapshots conhecidos do runtime.
+    ${CLR_CMD}save${CLR_RST}       Salva um snapshot local do runtime atual.
+    ${CLR_CMD}restore${CLR_RST}    Seleciona um snapshot salvo para restauracao.
+    ${CLR_CMD}commit${CLR_RST}     Cria snapshot de imagem+volume com mensagem e nome opcional.
+    ${CLR_CMD}pull${CLR_RST}       Baixa um snapshot remoto e prepara o volume vinculado.
+    ${CLR_CMD}push${CLR_RST}       Publica um snapshot local no Docker Hub.
+    ${CLR_CMD}select${CLR_RST}     Seleciona o snapshot a ser usado na proxima subida.
+    ${CLR_CMD}snapshots${CLR_RST}  Lista snapshots com ACTIVE, SELECTED e LATEST.
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container${CLR_RST}
+  ${CLR_CMD}dockermt container status${CLR_RST}
+  ${CLR_CMD}dockermt container open${CLR_RST}
+  ${CLR_CMD}dockermt instance list${CLR_RST}
+  ${CLR_CMD}dockermt instance factory${CLR_RST}
+  ${CLR_CMD}dockermt instance create EmptyMod${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod help${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod project${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod shell${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod chart${CLR_RST}
+  ${CLR_CMD}dockermt container save review-1${CLR_RST}
+  ${CLR_CMD}dockermt help container commit${CLR_RST}
+
+${CLR_DIM}Comandos de instancia foram movidos para 'dockermt instance'.${CLR_RST}
+USAGE
+}
+
+_instance_usage() {
+  _print_cli_banner
+  cat <<USAGE
+${CLR_HDR}dockermt instance${CLR_RST}
+Opera o namespace de instancias (criacao/listagem/base factory) e o nome local da instancia.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt instance${CLR_RST}
+  ${CLR_CMD}dockermt instance${CLR_RST} <COMMAND> [ARGS...]
+  ${CLR_CMD}dockermt help instance${CLR_RST} <COMMAND>
+
+${CLR_HDR}Commands:${CLR_RST}
+  ${CLR_CMD}show${CLR_RST}         Mostra o nome curto da instancia atual.
+  ${CLR_CMD}list${CLR_RST}         Lista instancias dockermt ativas e seus volumes/portas.
+  ${CLR_CMD}factory${CLR_RST}      Mostra a base factory de workspace usada pelas novas instancias.
+  ${CLR_CMD}create${CLR_RST}       Cria instancia limpa de indicators/experts com base tecnica compartilhada.
+  ${CLR_CMD}rename${CLR_RST}       Renomeia a instancia local (somente dentro da instancia, sem @).
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt instance${CLR_RST}
+  ${CLR_CMD}dockermt instance list${CLR_RST}
+  ${CLR_CMD}dockermt instance factory${CLR_RST}
+  ${CLR_CMD}dockermt instance create EmptyMod${CLR_RST}
+  ${CLR_CMD}dockermt instance create neuro --expert NeuroNet_DNG${CLR_RST}
+  ${CLR_CMD}dockermt instance rename alpha2${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod shell${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod container open${CLR_RST}
+USAGE
+}
+
+print_factory_workspace_info() {
+  require_docker
+  local mode="${1:-show}"
+  case "$mode" in
+    refresh)
+      refresh_factory_workspace_from_runtime
+      ;;
+    show|"")
+      ;;
+    *)
+      echo "ERR: uso: dockermt instance factory [refresh]" >&2
+      return 1
+      ;;
+  esac
+  _print_cli_banner
+  ensure_factory_workspace_volume
+  docker run --rm \
+    -e "FACTORY_VOLUME_NAME=${DOCKERMT_WORKSPACE_FACTORY_VOLUME}" \
+    -v "${DOCKERMT_WORKSPACE_FACTORY_VOLUME}:/factory:ro" \
+    alpine sh -lc '
+      set -eu
+      runtime_flag="no"
+      tree_base="/factory/MQL5"
+      if [ -f /factory/MT5ROOT/terminal64.exe ]; then
+        runtime_flag="yes"
+        tree_base="/factory/MT5ROOT/MQL5"
+      fi
+      printf "[dockermt] factory workspace.\n"
+      printf "volume       : %s\n" "${FACTORY_VOLUME_NAME}"
+      printf "manifest     : %s\n" "/factory/factory.json"
+      printf "readme       : %s\n" "/factory/FACTORY.md"
+      printf "contains     :\n"
+      if [ -d "$tree_base" ]; then
+        find "$tree_base" -mindepth 1 -maxdepth 1 -type d | sort | sed "s#^/factory/##; s#^#- #"
+      else
+        echo "- (vazio)"
+      fi
+      printf "runtime      : %s\n" "$runtime_flag"
+      printf "custom-user  : no\n"
+    '
+}
+
+_dukascopy_usage() {
+  _print_cli_banner
+  cat <<USAGE
+${CLR_HDR}dockermt dukascopy${CLR_RST}
+Sincroniza credenciais demo e atualiza o runtime MT5 local.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt dukascopy sync${CLR_RST}
+  ${CLR_CMD}dockermt help dukascopy sync${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt dukascopy sync${CLR_RST}
+  ${CLR_CMD}dockermt help dukascopy sync${CLR_RST}
+
+${CLR_HDR}Notes:${CLR_RST}
+  - roda o script privado em ${DUKASCOPY_SCRIPT_PATH}
+  - coleta credenciais MT5/JForex ainda validas
+  - escolhe a de maior expiracao por tipo
+  - salva o resultado em ${DUKASCOPY_STATE_FILE}
+  - salva variaveis exportaveis em ${DUKASCOPY_ENV_FILE}
+  - atualiza Login/Server/Password/KeepPrivate do MT5 em ${MT5_COMMON_INI_PATH}
+  - nao depende do campo Environment cifrado
+USAGE
+}
+
+install_script_path() {
+  printf '/config/dockermt/install-host.sh\n'
+}
+
+install_compose_dir() {
+  printf '/config/dockermt\n'
+}
+
+install_compose_path() {
+  printf '%s/docker-compose.yml\n' "$(install_compose_dir)"
+}
+
+install_env_path() {
+  printf '%s/.env\n' "$(install_compose_dir)"
+}
+
+install_readme_path() {
+  printf '%s/INSTALL.md\n' "$(install_compose_dir)"
+}
+
+current_runtime_source_volume() {
+  current_container_config_volume "$(resolve_current_runtime_container)"
+}
+
+ensure_factory_workspace_volume() {
+  docker volume inspect "$DOCKERMT_WORKSPACE_ZERO_VOLUME" >/dev/null 2>&1 || docker volume create "$DOCKERMT_WORKSPACE_ZERO_VOLUME" >/dev/null
+  if docker run --rm -v "${DOCKERMT_WORKSPACE_ZERO_VOLUME}:/factory" alpine sh -lc '[ -f /factory/factory.json ]' >/dev/null 2>&1; then
+    return 0
+  fi
+  docker run --rm \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -e "FACTORY_VOLUME_NAME=${DOCKERMT_WORKSPACE_ZERO_VOLUME}" \
+    -e "FACTORY_VERSION=${DOCKERMT_VERSION_CURRENT}" \
+    -v "${DOCKERMT_WORKSPACE_ZERO_VOLUME}:/factory" \
+    alpine sh -lc '
+      set -eu
+      mkdir -p \
+        /factory/MQL5/Indicators \
+        /factory/MQL5/Experts \
+        /factory/MQL5/Libraries \
+        /factory/MQL5/Services \
+        /factory/MQL5/Scripts \
+        /factory/MQL5/Files \
+        /factory/MQL5/Include
+      cat > /factory/FACTORY.md <<EOF
+# DockerMT factory workspace
+
+Volume:
+- ${FACTORY_VOLUME_NAME}
+
+Purpose:
+- clean MQL5 workspace base for new DockerMT instances
+
+Contains:
+- MQL5/Indicators
+- MQL5/Experts
+- MQL5/Libraries
+- MQL5/Services
+- MQL5/Scripts
+- MQL5/Files
+- MQL5/Include
+
+Does not contain:
+- Wine prefix
+- MT5 runtime install
+- Config
+- Profiles
+- user custom indicators
+- user custom experts
+- Codex session state
+- docs cache
+- instance extensions
+EOF
+      cat > /factory/factory.json <<EOF
+{
+  "kind": "dockermt-workspace-factory",
+  "name": "${FACTORY_VOLUME_NAME}",
+  "version": "${FACTORY_VERSION}",
+  "tree": [
+    "MQL5/Indicators",
+    "MQL5/Experts",
+    "MQL5/Libraries",
+    "MQL5/Services",
+    "MQL5/Scripts",
+    "MQL5/Files",
+    "MQL5/Include"
+  ],
+  "contains_runtime": false,
+  "contains_user_custom_content": false
+}
+EOF
+      chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /factory/MQL5
+      chmod 644 /factory/FACTORY.md /factory/factory.json
+    '
+}
+
+refresh_factory_workspace_from_runtime() {
+  require_docker
+  local source_volume="${1:-}"
+  [ -n "$source_volume" ] || source_volume="$(current_runtime_source_volume)"
+  [ -n "$source_volume" ] || { echo "ERR: nao foi possivel localizar o volume /config do runtime atual." >&2; return 1; }
+  docker volume inspect "$DOCKERMT_WORKSPACE_ZERO_VOLUME" >/dev/null 2>&1 || docker volume create "$DOCKERMT_WORKSPACE_ZERO_VOLUME" >/dev/null
+  docker run --rm \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -e "FACTORY_VOLUME_NAME=${DOCKERMT_WORKSPACE_ZERO_VOLUME}" \
+    -e "FACTORY_VERSION=${DOCKERMT_VERSION_CURRENT}" \
+    -e "MT5_ROOT_REL=${DOCKERMT_MT5_ROOT_REL}" \
+    -e "MQL5_ROOT_REL=${DOCKERMT_MQL5_ROOT_REL}" \
+    -v "${source_volume}:/srcconfig:ro" \
+    -v "${DOCKERMT_WORKSPACE_ZERO_VOLUME}:/factory" \
+    alpine sh -lc '
+      set -eu
+      src_mt5="/srcconfig/${MT5_ROOT_REL}"
+      src_mql5="/srcconfig/${MQL5_ROOT_REL}"
+      dst_mt5="/factory/MT5ROOT"
+      dst="$dst_mt5/MQL5"
+      [ -d "$src_mt5" ] || exit 1
+      [ -d "$src_mql5" ] || exit 1
+      find /factory -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
+      mkdir -p "$dst_mt5"
+      cd "$src_mt5" && tar cf - . | (cd "$dst_mt5" && tar xf -)
+      rm -rf "$dst"
+      mkdir -p \
+        "$dst/Indicators" \
+        "$dst/Experts" \
+        "$dst/Libraries" \
+        "$dst/Services" \
+        "$dst/Scripts" \
+        "$dst/Files" \
+        "$dst/Include"
+
+      copy_rel() {
+        rel="$1"
+        [ -e "$src_mql5/$rel" ] || return 0
+        mkdir -p "$dst/$(dirname "$rel")"
+        cd "$src_mql5" && tar cf - "$rel" | (cd "$dst" && tar xf -)
+      }
+
+      copy_rel "Indicators/Examples"
+      copy_rel "Indicators/Free Indicators"
+      copy_rel "Experts/Advisors"
+      copy_rel "Experts/Examples"
+      copy_rel "Experts/Free Robots"
+      copy_rel "Scripts/Examples"
+
+      if [ -d "$src_mql5/Include" ]; then
+        cd "$src_mql5/Include" && tar cf - . | (cd "$dst/Include" && tar xf -)
+      fi
+      if [ -d "$src_mql5/Libraries" ]; then
+        cd "$src_mql5/Libraries" && tar cf - . | (cd "$dst/Libraries" && tar xf -)
+      fi
+      for service in TelnetMT_OficialTelnetServiceBootstrap.ex5 TelnetMT_SocketTelnetService.ex5; do
+        if [ -f "$src_mql5/Services/$service" ]; then
+          cp -f "$src_mql5/Services/$service" "$dst/Services/$service"
+        fi
+      done
+
+      cat > /factory/FACTORY.md <<EOF
+# DockerMT factory workspace
+
+Volume:
+- ${FACTORY_VOLUME_NAME}
+
+Source:
+- current runtime MT5 tree, with MQL5 pruned to factory-safe content
+
+Contains:
+- MQL5/Indicators
+  - Examples
+  - Free Indicators
+- MQL5/Experts
+  - Advisors
+  - Examples
+  - Free Robots
+- MQL5/Libraries
+- MQL5/Services
+- MQL5/Scripts
+  - Examples
+- MQL5/Files
+- MQL5/Include
+
+Does not contain:
+- Config
+- Profiles
+- Images
+- Logs
+- Shared Projects
+- custom user indicators
+- custom user experts
+- custom user files
+- Codex session state
+- docs cache
+- instance extensions
+EOF
+      cat > /factory/factory.json <<EOF
+{
+  "kind": "dockermt-workspace-factory",
+  "name": "${FACTORY_VOLUME_NAME}",
+  "version": "${FACTORY_VERSION}",
+  "source": "current-runtime-with-pruned-mql5",
+  "tree": [
+    "MT5ROOT/MQL5/Indicators",
+    "MT5ROOT/MQL5/Experts",
+    "MT5ROOT/MQL5/Libraries",
+    "MT5ROOT/MQL5/Services",
+    "MT5ROOT/MQL5/Scripts",
+    "MT5ROOT/MQL5/Files",
+    "MT5ROOT/MQL5/Include"
+  ],
+  "indicators_allow": ["Examples", "Free Indicators"],
+  "experts_allow": ["Advisors", "Examples", "Free Robots"],
+  "scripts_allow": ["Examples"],
+  "contains_runtime": true,
+  "contains_user_custom_content": false
+}
+EOF
+      chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "$dst_mt5" 2>/dev/null || true
+      chmod 644 /factory/FACTORY.md /factory/factory.json
+    '
+}
+
+factory_has_runtime_install() {
+  docker run --rm \
+    -v "${DOCKERMT_WORKSPACE_FACTORY_VOLUME}:/factory:ro" \
+    alpine sh -lc '[ -f /factory/MT5ROOT/terminal64.exe ]'
+}
+
+prepare_codex_layout_in_volume() {
+  local target_volume="${1:-}"
+  local instance_name="${2:-dockermt}"
+  local layout_mode="${3:-reuse}"
+  [ -n "$target_volume" ] || return 1
+  docker run --rm \
+    -e "MQL5_ROOT_REL=${DOCKERMT_MQL5_ROOT_REL}" \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -e "CODEX_HOME_REL=${DOCKERMT_CODEX_HOME_REL}" \
+    -e "CODEX_SESSION_REL=${DOCKERMT_CODEX_SESSION_REL}" \
+    -e "EXT_REL=${DOCKERMT_EXTENSIONS_REL}" \
+    -e "EXT_COMMANDS_REL=${DOCKERMT_EXTENSION_COMMANDS_REL}" \
+    -e "DOCS_REL=${DOCKERMT_CODEX_DOCS_REL}" \
+    -e "INSTANCE_NAME=${instance_name}" \
+    -e "LAYOUT_MODE=${layout_mode}" \
+    -v "${target_volume}:/config" \
+    alpine sh -lc '
+      set -eu
+      mql5="/config/${MQL5_ROOT_REL}"
+      codex_home="/config/${CODEX_HOME_REL}"
+      session="/config/${CODEX_SESSION_REL}"
+      ext_root="/config/${EXT_REL}"
+      ext_commands="/config/${EXT_COMMANDS_REL}"
+      docs_dir="/config/${DOCS_REL}"
+      project_meta="/config/.dockermt/project"
+      if [ "${LAYOUT_MODE}" = "fresh" ]; then
+        rm -rf "$session" "$ext_root" "$docs_dir" "$project_meta"
+      fi
+      mkdir -p "$codex_home/.codex" "$session/trash" "$ext_commands" "$docs_dir" "$project_meta"
+      mkdir -p \
+        "$mql5/Files/${INSTANCE_NAME}" \
+        "$mql5/Experts/${INSTANCE_NAME}" \
+        "$mql5/Indicators/${INSTANCE_NAME}" \
+        "$mql5/Services/${INSTANCE_NAME}" \
+        "$mql5/Include/${INSTANCE_NAME}" \
+        "$mql5/Scripts/${INSTANCE_NAME}" \
+        "$mql5/Libraries/${INSTANCE_NAME}"
+      ln -snf "$mql5" "$session/mql5"
+      ln -snf "$docs_dir" "$session/docs"
+      ln -snf "$ext_commands" "$session/extensions"
+      mkdir -p "$session/project"
+      ln -snf "$mql5/Files/${INSTANCE_NAME}" "$session/project/files"
+      ln -snf "$mql5/Experts/${INSTANCE_NAME}" "$session/project/experts"
+      ln -snf "$mql5/Indicators/${INSTANCE_NAME}" "$session/project/indicators"
+      ln -snf "$mql5/Services/${INSTANCE_NAME}" "$session/project/services"
+      ln -snf "$mql5/Include/${INSTANCE_NAME}" "$session/project/include"
+      ln -snf "$mql5/Scripts/${INSTANCE_NAME}" "$session/project/scripts"
+      ln -snf "$mql5/Libraries/${INSTANCE_NAME}" "$session/project/libraries"
+      ln -snf "$docs_dir" "$session/project/docs"
+      ln -snf "$ext_commands" "$session/project/extensions"
+      ln -snf "$session/trash" "$session/project/trash"
+      ln -snf "$session/projects" "$session/project/projects"
+      ln -snf "/config/.dockermt/projects" "$session/project/projects-meta"
+      ln -snf "$project_meta/project.json" "$session/project/instance-meta.json"
+      ln -snf "$project_meta/events.ndjson" "$session/project/instance-log.ndjson"
+      ln -snf "$project_meta/current-codex-session.txt" "$session/project/instance-codex-session.txt"
+cat > "$session/AGENTS.md" <<EOF_AGENTS
+# DockerMT Codex Instance
+
+You are inside the DockerMT instance: ${INSTANCE_NAME}.
+
+Primary work targets:
+- \`project/\`
+- \`mql5/\`
+- \`extensions/\`
+- \`trash/\`
+
+Rules:
+- Be highly proactive and execute the user request end-to-end when safe.
+- Focus on MQL5, Java, financial markets, time-series, neural networks, indicators, experts, and market automation.
+- Prefer deep, truthful, non-trivial technical guidance.
+- Keep files organized and easy to distinguish.
+- Do not mix active code with legacy code; move discarded material into \`trash/\`.
+- Do not modify the DockerMT core or the TelnetMT service files.
+- Use the local docs in \`docs/\` before guessing.
+- Before changing DockerMT core behavior (spawn, @routing, container open, shell, import, volumes or runtime), read the canonical guide at \`/config/.dockermt/docs/INSTANCES.md\` first and follow it strictly.
+- When creating DockerMT commands, add them only as instance-local extensions under \`extensions/\`.
+- Prefer the instance project directories:
+  - \`project/files\`
+  - \`project/experts\`
+  - \`project/indicators\`
+  - \`project/services\`
+  - \`project/include\`
+  - \`project/scripts\`
+  - \`project/libraries\`
+  - \`project/projects\`
+  - \`project/projects-meta\`
+
+Project state policy:
+- Project means git repository.
+- Each git repository under \`project/\` is a separate project.
+- Always consult the matching metadata in \`project/projects-meta/<slug>/project.json\` and \`project/projects-meta/<slug>/events.ndjson\` before answering about previous work on a project.
+- Use \`project/instance-meta.json\` only for instance-wide state such as imports and last global access.
+- When the user asks where work stopped, summarize from the repository project metadata and event log first.
+EOF_AGENTS
+cat > "$session/codex-context.yaml" <<EOF_CTX
+instance: ${INSTANCE_NAME}
+workspace:
+  project: project
+  mql5: mql5
+  docs: docs
+  extensions: extensions
+  trash: trash
+policy:
+  core_dockermt_writable: false
+  mt5_services_writable: false
+  extension_mode: direct_commands
+EOF_CTX
+cat > "$ext_root/README.md" <<EOF_EXT
+# DockerMT instance extensions
+
+Put new instance-local commands in:
+- commands/<name>.sh
+- commands/<name>.py
+- commands/<name>.js
+
+These commands are loaded directly by \`dockermt\` inside this instance.
+Core command names must not be reused.
+EOF_EXT
+      if [ -d "$mql5/Services" ]; then
+        find "$mql5/Services" -mindepth 1 -maxdepth 1 -type f -exec chown 0:0 {} +
+        find "$mql5/Services" -mindepth 1 -maxdepth 1 -type f -exec chmod 644 {} +
+      fi
+      chown -R 0:0 /config/.dockermt || true
+      chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "$codex_home" "$session" "$ext_root" "$docs_dir" "$project_meta" || true
+    '
+}
+
+sync_codex_docs_into_volume() {
+  local target_volume="${1:-}"
+  [ -n "$target_volume" ] || return 1
+  docker run --rm \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -e "DOCS_REL=${DOCKERMT_CODEX_DOCS_REL}" \
+    -v "${target_volume}:/config" \
+    -v "${DOCKERMT_CODEX_DOCS_SOURCE}:/docs-src:ro" \
+    alpine sh -lc '
+      set -eu
+      docs_dir="/config/${DOCS_REL}"
+      status_file="/config/.dockermt/docs/status.txt"
+      mkdir -p "$docs_dir" "$(dirname "$status_file")"
+      find "$docs_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
+      count="$(find /docs-src -mindepth 1 2>/dev/null | wc -l | tr -d " ")"
+      if [ "${count:-0}" -gt 0 ]; then
+        cd /docs-src && tar cf - . | (cd "$docs_dir" && tar xf -)
+        printf "status=ready\nsource=%s\ncount=%s\n" "/mnt/c/mql/docs" "$count" > "$status_file"
+      else
+        printf "status=missing\nsource=%s\ncount=0\n" "/mnt/c/mql/docs" > "$status_file"
+      fi
+      chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "$docs_dir" "$(dirname "$status_file")" || true
+    ' >/dev/null 2>&1 || true
+}
+
+seed_runtime_shared_mql5_dirs_in_volume() {
+  local source_volume="${1:-}"
+  local target_volume="${2:-}"
+  [ -n "$source_volume" ] || return 1
+  [ -n "$target_volume" ] || return 1
+  docker run --rm \
+    -e "MQL5_ROOT_REL=${DOCKERMT_MQL5_ROOT_REL}" \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -v "${source_volume}:/srcconfig:ro" \
+    -v "${target_volume}:/config" \
+    alpine sh -lc '
+      set -eu
+      sync_dir() {
+        src_dir="$1"
+        dst_dir="$2"
+        owner="$3"
+        mkdir -p "$dst_dir"
+        find "$dst_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
+        if [ -d "$src_dir" ]; then
+          cd "$src_dir" && tar cf - . | (cd "$dst_dir" && tar xf -)
+        fi
+        chown -R "$owner" "$dst_dir" || true
+        find "$dst_dir" -type d -exec chmod 755 {} +
+        find "$dst_dir" -type f -exec chmod 644 {} +
+      }
+
+      sync_dir "/srcconfig/${MQL5_ROOT_REL}/Include"   "/config/${MQL5_ROOT_REL}/Include"   "${RUNTIME_UID}:${RUNTIME_GID}"
+      sync_dir "/srcconfig/${MQL5_ROOT_REL}/Libraries" "/config/${MQL5_ROOT_REL}/Libraries" "${RUNTIME_UID}:${RUNTIME_GID}"
+      sync_dir "/srcconfig/${MQL5_ROOT_REL}/Services"  "/config/${MQL5_ROOT_REL}/Services"  "0:0"
+    ' >/dev/null 2>&1 || true
+}
+
+sync_codex_auth_into_volume() {
+  local target_volume="${1:-}"
+  [ -n "$target_volume" ] || return 1
+  docker run --rm \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -e "CODEX_HOME_REL=${DOCKERMT_CODEX_HOME_REL}" \
+    -v "${target_volume}:/config" \
+    -v "${DOCKERMT_CODEX_AUTH_SOURCE}:/codex-auth:ro" \
+    alpine sh -lc '
+      set -eu
+      src="/codex-auth"
+      dst="/config/${CODEX_HOME_REL}/.codex"
+      mkdir -p "$dst"
+      for name in auth.json .credentials.json config.toml; do
+        if [ -f "$src/$name" ]; then
+          cp -f "$src/$name" "$dst/$name"
+        fi
+      done
+      chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "$dst" || true
+      find "$dst" -type d -exec chmod 700 {} +
+      find "$dst" -type f -exec chmod 600 {} +
+    ' >/dev/null 2>&1 || true
+}
+
+install_host_bash_function() {
+  cat <<'EOF'
+dockermt() {
+  __dockermt_exists() {
+    local cname="${1:-}"
+    [ -n "$cname" ] || return 1
+    docker inspect "$cname" >/dev/null 2>&1
+  }
+
+  __dockermt_label() {
+    local cname="${1:-}" key="${2:-}"
+    [ -n "$cname" ] || return 0
+    [ -n "$key" ] || return 0
+    docker inspect --format "{{index .Config.Labels \"$key\"}}" "$cname" 2>/dev/null | sed 's/^<no value>$//'
+  }
+
+  __dockermt_sanitize_key() {
+    local raw="${1:-}"
+    raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+    raw="$(printf '%s' "$raw" | sed 's/[^a-z0-9._-]/-/g; s/^-*//; s/-*$//; s/--*/-/g')"
+    printf '%s\n' "$raw"
+  }
+
+  __dockermt_find_first_by_label() {
+    local key="${1:-}" value="${2:-}" name=""
+    [ -n "$key" ] || return 1
+    [ -n "$value" ] || return 1
+    name="$(docker ps --filter "label=${key}=${value}" --format '{{.Names}}' 2>/dev/null | head -n 1)"
+    [ -n "$name" ] || return 1
+    printf '%s\n' "$name"
+  }
+
+  __dockermt_find_instance_by_name() {
+    local iname="${1:-}" name=""
+    [ -n "$iname" ] || return 1
+    name="$(docker ps \
+      --filter "label=dockermt.role=instance" \
+      --filter "label=dockermt.instance.name=${iname}" \
+      --format '{{.Names}}' 2>/dev/null | head -n 1)"
+    [ -n "$name" ] || return 1
+    printf '%s\n' "$name"
+  }
+
+  __dockermt_resolve_named() {
+    local raw="${1:-}" safe="" by_label=""
+    [ -n "$raw" ] || return 1
+    if __dockermt_exists "$raw"; then
+      printf '%s\n' "$raw"
+      return 0
+    fi
+    safe="$(__dockermt_sanitize_key "$raw")"
+    if [ -n "$safe" ]; then
+      by_label="$(__dockermt_find_instance_by_name "$safe" 2>/dev/null || true)"
+      if [ -n "$by_label" ]; then
+        printf '%s\n' "$by_label"
+        return 0
+      fi
+    fi
+    if [ -n "$safe" ] && __dockermt_exists "dockermt-$safe"; then
+      printf 'dockermt-%s\n' "$safe"
+      return 0
+    fi
+    return 1
+  }
+
+  __dockermt_resolve_central() {
+    local cname
+    if [ -n "${DOCKERMT_CENTRAL_NAME:-}" ] && __dockermt_exists "$DOCKERMT_CENTRAL_NAME"; then
+      printf '%s\n' "$DOCKERMT_CENTRAL_NAME"
+      return 0
+    fi
+    cname="$(__dockermt_find_first_by_label "dockermt.role" "central" 2>/dev/null || true)"
+    if [ -n "$cname" ]; then
+      printf '%s\n' "$cname"
+      return 0
+    fi
+    cname="$(__dockermt_find_first_by_label "dockermt.central" "1" 2>/dev/null || true)"
+    if [ -n "$cname" ]; then
+      printf '%s\n' "$cname"
+      return 0
+    fi
+    cname="$(docker ps --format '{{.Names}} {{.Labels}}' 2>/dev/null | awk '$1 ~ /^dockermt/ && $0 !~ /dockermt.runtime=1/ {print $1; exit}')"
+    if [ -n "$cname" ]; then
+      printf '%s\n' "$cname"
+      return 0
+    fi
+    cname="$(docker ps --filter 'label=dockermt.runtime=1' --format '{{.Names}}' 2>/dev/null | head -n 1)"
+    if [ -n "$cname" ]; then
+      local parent_label=""
+      parent_label="$(__dockermt_label "$cname" "dockermt.runtime.parent")"
+      if [ -n "$parent_label" ] && __dockermt_exists "$parent_label"; then
+        printf '%s\n' "$parent_label"
+        return 0
+      fi
+    fi
+    if __dockermt_exists "dockermt"; then
+      printf 'dockermt\n'
+      return 0
+    fi
+    return 1
+  }
+
+  __dockermt_target_file() {
+    printf '%s\n' "${HOME}/.dockermt/host-target"
+  }
+
+  __dockermt_pick_display() {
+    local resolved="${DOCKERMT_APP_DISPLAY:-${DISPLAY:-}}"
+    if [ -z "$resolved" ] && [ -r /etc/resolv.conf ]; then
+      local ns=""
+      ns="$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
+      if [ -n "$ns" ]; then
+        resolved="${ns}:0"
+      fi
+    fi
+    printf '%s\n' "$resolved"
+  }
+
+  __dockermt_load_target() {
+    local target_file loaded=""
+    target_file="$(__dockermt_target_file)"
+    if [ -z "${DOCKERMT_CONTAINER_NAME:-}" ] && [ -r "$target_file" ]; then
+      loaded="$(head -n 1 "$target_file" 2>/dev/null | tr -d '\r\n')"
+      [ -n "$loaded" ] && DOCKERMT_CONTAINER_NAME="$loaded"
+    fi
+  }
+
+  __dockermt_save_target() {
+    local target_name="${1:-}" target_file=""
+    [ -n "$target_name" ] || return 1
+    target_file="$(__dockermt_target_file)"
+    mkdir -p "$(dirname "$target_file")"
+    printf '%s\n' "$target_name" > "$target_file"
+  }
+
+  __dockermt_select_target() {
+    local key="${1:-}" resolved=""
+    [ -n "$key" ] || return 1
+    if [ "$key" = "central" ]; then
+      resolved="$(__dockermt_resolve_central)"
+    else
+      resolved="$(__dockermt_resolve_named "$key")"
+    fi
+    [ -n "$resolved" ] || return 1
+    export DOCKERMT_CONTAINER_NAME="$resolved"
+    __dockermt_save_target "$resolved" >/dev/null 2>&1 || true
+    printf '[dockermt] alvo padrao: %s\n' "$resolved"
+    return 0
+  }
+
+  local first="${1:-}"
+  if [[ "$first" == @* ]]; then
+    local target_key="${first#@}"
+    [ -n "$target_key" ] || { echo "ERR: alvo vazio em '@'." >&2; return 1; }
+    if [ "$#" -eq 1 ]; then
+      __dockermt_select_target "$target_key" || {
+        echo "ERR: alvo nao localizado: @$target_key" >&2
+        return 1
+      }
+      return 0
+    fi
+    if [ "$target_key" = "central" ]; then
+      __dockermt_select_target "central" || {
+        echo "ERR: runtime central nao localizado." >&2
+        return 1
+      }
+      shift || true
+    fi
+  fi
+
+  __dockermt_load_target
+  local target_container="${DOCKERMT_CONTAINER_NAME:-}"
+  if [ -z "$target_container" ]; then
+    target_container="$(__dockermt_resolve_central 2>/dev/null || true)"
+    [ -n "$target_container" ] || target_container="dockermt"
+    export DOCKERMT_CONTAINER_NAME="$target_container"
+  fi
+
+  if ! __dockermt_exists "$target_container"; then
+    echo "ERR: container alvo nao encontrado: $target_container" >&2
+    return 1
+  fi
+
+  local exec_mode=(-i)
+  local app_display=""
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec_mode=(-it)
+  fi
+  app_display="$(__dockermt_pick_display)"
+  docker exec \
+    "${exec_mode[@]}" \
+    -e "DOCKERMT_CONTAINER_NAME=${target_container}" \
+    -e "DOCKERMT_APP_DISPLAY=${app_display}" \
+    -e "DOCKERMT_FORCE_COLOR=1" \
+    -e "CLICOLOR_FORCE=1" \
+    -e "COLUMNS=${COLUMNS:-120}" \
+    -e "LINES=${LINES:-40}" \
+    "${target_container}" /usr/local/bin/dockermt "$@"
+}
+EOF
+}
+
+write_install_host_script() {
+  local out
+  out="$(install_script_path)"
+  mkdir -p "$(dirname "$out")"
+  cat > "$out" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat <<'SNIPPET'
+dockermt() {
+  __dockermt_exists() {
+    local cname="${1:-}"
+    [ -n "$cname" ] || return 1
+    docker inspect "$cname" >/dev/null 2>&1
+  }
+
+  __dockermt_label() {
+    local cname="${1:-}" key="${2:-}"
+    [ -n "$cname" ] || return 0
+    [ -n "$key" ] || return 0
+    docker inspect --format "{{index .Config.Labels \"$key\"}}" "$cname" 2>/dev/null | sed 's/^<no value>$//'
+  }
+
+  __dockermt_sanitize_key() {
+    local raw="${1:-}"
+    raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+    raw="$(printf '%s' "$raw" | sed 's/[^a-z0-9._-]/-/g; s/^-*//; s/-*$//; s/--*/-/g')"
+    printf '%s\n' "$raw"
+  }
+
+  __dockermt_find_first_by_label() {
+    local key="${1:-}" value="${2:-}" name=""
+    [ -n "$key" ] || return 1
+    [ -n "$value" ] || return 1
+    name="$(docker ps --filter "label=${key}=${value}" --format '{{.Names}}' 2>/dev/null | head -n 1)"
+    [ -n "$name" ] || return 1
+    printf '%s\n' "$name"
+  }
+
+  __dockermt_find_instance_by_name() {
+    local iname="${1:-}" name=""
+    [ -n "$iname" ] || return 1
+    name="$(docker ps \
+      --filter "label=dockermt.role=instance" \
+      --filter "label=dockermt.instance.name=${iname}" \
+      --format '{{.Names}}' 2>/dev/null | head -n 1)"
+    [ -n "$name" ] || return 1
+    printf '%s\n' "$name"
+  }
+
+  __dockermt_resolve_named() {
+    local raw="${1:-}" safe="" by_label=""
+    [ -n "$raw" ] || return 1
+    if __dockermt_exists "$raw"; then
+      printf '%s\n' "$raw"
+      return 0
+    fi
+    safe="$(__dockermt_sanitize_key "$raw")"
+    if [ -n "$safe" ]; then
+      by_label="$(__dockermt_find_instance_by_name "$safe" 2>/dev/null || true)"
+      if [ -n "$by_label" ]; then
+        printf '%s\n' "$by_label"
+        return 0
+      fi
+    fi
+    if [ -n "$safe" ] && __dockermt_exists "dockermt-$safe"; then
+      printf 'dockermt-%s\n' "$safe"
+      return 0
+    fi
+    return 1
+  }
+
+  __dockermt_resolve_central() {
+    local cname
+    if [ -n "${DOCKERMT_CENTRAL_NAME:-}" ] && __dockermt_exists "$DOCKERMT_CENTRAL_NAME"; then
+      printf '%s\n' "$DOCKERMT_CENTRAL_NAME"
+      return 0
+    fi
+    cname="$(__dockermt_find_first_by_label "dockermt.role" "central" 2>/dev/null || true)"
+    if [ -n "$cname" ]; then
+      printf '%s\n' "$cname"
+      return 0
+    fi
+    cname="$(__dockermt_find_first_by_label "dockermt.central" "1" 2>/dev/null || true)"
+    if [ -n "$cname" ]; then
+      printf '%s\n' "$cname"
+      return 0
+    fi
+    cname="$(docker ps --format '{{.Names}} {{.Labels}}' 2>/dev/null | awk '$1 ~ /^dockermt/ && $0 !~ /dockermt.runtime=1/ {print $1; exit}')"
+    if [ -n "$cname" ]; then
+      printf '%s\n' "$cname"
+      return 0
+    fi
+    cname="$(docker ps --filter 'label=dockermt.runtime=1' --format '{{.Names}}' 2>/dev/null | head -n 1)"
+    if [ -n "$cname" ]; then
+      local parent_label=""
+      parent_label="$(__dockermt_label "$cname" "dockermt.runtime.parent")"
+      if [ -n "$parent_label" ] && __dockermt_exists "$parent_label"; then
+        printf '%s\n' "$parent_label"
+        return 0
+      fi
+    fi
+    if __dockermt_exists "dockermt"; then
+      printf 'dockermt\n'
+      return 0
+    fi
+    return 1
+  }
+
+  __dockermt_target_file() {
+    printf '%s\n' "${HOME}/.dockermt/host-target"
+  }
+
+  __dockermt_pick_display() {
+    local resolved="${DOCKERMT_APP_DISPLAY:-${DISPLAY:-}}"
+    if [ -z "$resolved" ] && [ -r /etc/resolv.conf ]; then
+      local ns=""
+      ns="$(awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
+      if [ -n "$ns" ]; then
+        resolved="${ns}:0"
+      fi
+    fi
+    printf '%s\n' "$resolved"
+  }
+
+  __dockermt_load_target() {
+    local target_file loaded=""
+    target_file="$(__dockermt_target_file)"
+    if [ -z "${DOCKERMT_CONTAINER_NAME:-}" ] && [ -r "$target_file" ]; then
+      loaded="$(head -n 1 "$target_file" 2>/dev/null | tr -d '\r\n')"
+      [ -n "$loaded" ] && DOCKERMT_CONTAINER_NAME="$loaded"
+    fi
+  }
+
+  __dockermt_save_target() {
+    local target_name="${1:-}" target_file=""
+    [ -n "$target_name" ] || return 1
+    target_file="$(__dockermt_target_file)"
+    mkdir -p "$(dirname "$target_file")"
+    printf '%s\n' "$target_name" > "$target_file"
+  }
+
+  __dockermt_select_target() {
+    local key="${1:-}" resolved=""
+    [ -n "$key" ] || return 1
+    if [ "$key" = "central" ]; then
+      resolved="$(__dockermt_resolve_central)"
+    else
+      resolved="$(__dockermt_resolve_named "$key")"
+    fi
+    [ -n "$resolved" ] || return 1
+    export DOCKERMT_CONTAINER_NAME="$resolved"
+    __dockermt_save_target "$resolved" >/dev/null 2>&1 || true
+    printf '[dockermt] alvo padrao: %s\n' "$resolved"
+    return 0
+  }
+
+  local first="${1:-}"
+  if [[ "$first" == @* ]]; then
+    local target_key="${first#@}"
+    [ -n "$target_key" ] || { echo "ERR: alvo vazio em '@'." >&2; return 1; }
+    if [ "$#" -eq 1 ]; then
+      __dockermt_select_target "$target_key" || {
+        echo "ERR: alvo nao localizado: @$target_key" >&2
+        return 1
+      }
+      return 0
+    fi
+    if [ "$target_key" = "central" ]; then
+      __dockermt_select_target "central" || {
+        echo "ERR: runtime central nao localizado." >&2
+        return 1
+      }
+      shift || true
+    fi
+  fi
+
+  __dockermt_load_target
+  local target_container="${DOCKERMT_CONTAINER_NAME:-}"
+  if [ -z "$target_container" ]; then
+    target_container="$(__dockermt_resolve_central 2>/dev/null || true)"
+    [ -n "$target_container" ] || target_container="dockermt"
+    export DOCKERMT_CONTAINER_NAME="$target_container"
+  fi
+
+  if ! __dockermt_exists "$target_container"; then
+    echo "ERR: container alvo nao encontrado: $target_container" >&2
+    return 1
+  fi
+
+  local exec_mode=(-i)
+  local app_display=""
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec_mode=(-it)
+  fi
+  app_display="$(__dockermt_pick_display)"
+  docker exec \
+    "${exec_mode[@]}" \
+    -e "DOCKERMT_CONTAINER_NAME=${target_container}" \
+    -e "DOCKERMT_APP_DISPLAY=${app_display}" \
+    -e "DOCKERMT_FORCE_COLOR=1" \
+    -e "CLICOLOR_FORCE=1" \
+    -e "COLUMNS=${COLUMNS:-120}" \
+    -e "LINES=${LINES:-40}" \
+    "${target_container}" /usr/local/bin/dockermt "$@"
+}
+SNIPPET
+EOF
+  chmod +x "$out" || true
+  printf '%s\n' "$out"
+}
+
+write_install_env_file() {
+  local workspace_volume="${1:-}"
+  local out image_ref
+  [ -n "$workspace_volume" ] || return 1
+  out="$(install_env_path)"
+  image_ref="duds4/dockermt:${DOCKERMT_VERSION_CURRENT}"
+  mkdir -p "$(dirname "$out")"
+  cat > "$out" <<EOF
+DOCKERMT_IMAGE=${image_ref}
+DOCKERMT_CONTAINER_NAME=dockermt
+DOCKERMT_CONFIG_VOLUME=dockermt-config
+DOCKERMT_STATE_VOLUME=dockermt_state
+DOCKERMT_WORKSPACE_FACTORY_VOLUME=${workspace_volume}
+DOCKERMT_WEB_PORT=3000
+DOCKERMT_TELNET_PORT=1122
+DOCKERMT_PY_PORT=8001
+EOF
+  printf '%s\n' "$out"
+}
+
+write_install_compose_file() {
+  local out
+  out="$(install_compose_path)"
+  mkdir -p "$(dirname "$out")"
+  cat > "$out" <<'EOF'
+services:
+  dockermt:
+    image: ${DOCKERMT_IMAGE}
+    container_name: ${DOCKERMT_CONTAINER_NAME}
+    hostname: ${DOCKERMT_CONTAINER_NAME}
+    restart: unless-stopped
+    gpus: all
+    labels:
+      - "dockermt.central=1"
+      - "dockermt.role=central"
+      - "dockermt.node.role=central"
+      - "dockermt.node.name=${DOCKERMT_CONTAINER_NAME}"
+    environment:
+      DOCKERMT_CONTAINER_NAME: ${DOCKERMT_CONTAINER_NAME}
+      DOCKERMT_STATE_VOLUME: ${DOCKERMT_STATE_VOLUME}
+      DOCKERMT_WORKSPACE_FACTORY_VOLUME: ${DOCKERMT_WORKSPACE_FACTORY_VOLUME}
+      TELNETMT_PORT: ${DOCKERMT_TELNET_PORT}
+      MT5_WEB_PORT: ${DOCKERMT_WEB_PORT}
+      MT5_PY_PORT: ${DOCKERMT_PY_PORT}
+    volumes:
+      - ${DOCKERMT_CONFIG_VOLUME}:/config
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${DOCKERMT_WEB_PORT}:3000"
+      - "${DOCKERMT_TELNET_PORT}:1122"
+      - "${DOCKERMT_PY_PORT}:8001"
+
+volumes:
+  dockermt-config:
+    name: ${DOCKERMT_CONFIG_VOLUME}
+EOF
+  printf '%s\n' "$out"
+}
+
+write_install_readme_file() {
+  local workspace_volume="${1:-}"
+  local out
+  [ -n "$workspace_volume" ] || return 1
+  out="$(install_readme_path)"
+  mkdir -p "$(dirname "$out")"
+  cat > "$out" <<EOF
+# DockerMT install bootstrap
+
+Arquivos gerados:
+- $(install_compose_path)
+- $(install_env_path)
+- $(install_script_path)
+
+Este bootstrap foi gerado dentro do volume /config do DockerMT central.
+
+Volume factory de workspace:
+- ${workspace_volume}
+
+Para usar no host:
+1. extraia os arquivos para uma pasta local, por exemplo:
+   docker cp dockermt:/config/dockermt ./dockermt-bootstrap
+2. entre na pasta extraida:
+   cd dockermt-bootstrap
+3. suba o container central:
+   docker compose up -d
+4. instale a funcao curta do host:
+   cat install-host.sh
+
+Depois disso:
+- dockermt
+- dockermt @central
+- dockermt container status
+- dockermt @central shell
+- dockermt instance create EmptyMod
+- dockermt @emptymod project
+- dockermt @emptymod shell
+- dentro da shell: codexmt
+EOF
+  printf '%s\n' "$out"
+}
+
+runtime_install() {
+  _print_cli_banner
+  local mode="script"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      script|print|help|-h|--help)
+        mode="$1"
+        ;;
+      *)
+        echo "ERR: argumento inesperado em 'dockermt install': $1" >&2
+        return 1
+        ;;
+    esac
+    shift || true
+  done
+  case "$mode" in
+    script|"")
+      local out env_file compose_file readme_file workspace_volume
+      ensure_factory_workspace_volume
+      workspace_volume="$DOCKERMT_WORKSPACE_FACTORY_VOLUME"
+      out="$(write_install_host_script)"
+      env_file="$(write_install_env_file "$workspace_volume")"
+      compose_file="$(write_install_compose_file)"
+      readme_file="$(write_install_readme_file "$workspace_volume")"
+      printf 'install.compose: %s\n' "$compose_file"
+      printf 'install.env: %s\n' "$env_file"
+      printf 'install.script: %s\n' "$out"
+      printf 'install.readme: %s\n' "$readme_file"
+      printf 'install.workspace-factory: %s\n' "$workspace_volume"
+      printf 'install.next.1: docker cp dockermt:/config/dockermt ./dockermt-bootstrap\n'
+      printf 'install.next.2: cd dockermt-bootstrap\n'
+      printf 'install.next.3: docker compose up -d\n'
+      printf 'install.next.4: cat install-host.sh\n'
+      ;;
+    print)
+      install_host_bash_function
+      ;;
+    help|-h|--help)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt install${CLR_RST}
+Gera o bootstrap curto do host para chamar o DockerMT central.
+Usa sempre o factory workspace limpo do DockerMT.
+As instancias criadas depois nascem com projeto rastreado em metadata propria.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt install${CLR_RST}
+  ${CLR_CMD}dockermt install print${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt install${CLR_RST}
+  ${CLR_CMD}dockermt install print${CLR_RST}
+USAGE
+      ;;
+    *)
+      echo "ERR: subcomando desconhecido em 'dockermt install': $mode" >&2
+      return 1
+      ;;
+  esac
+}
+
+_root_topic_usage() {
+  case "${1:-}" in
+    map)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt map${CLR_RST}
+Mostra portas, caminhos e recursos importantes do container atual.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt map${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt map${CLR_RST}
+  ${CLR_CMD}dockermt map | sed -n '1,20p'${CLR_RST}
+USAGE
+      ;;
+    ping)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt ping${CLR_RST}
+Testa conectividade com o socket TelnetMT do runtime atual.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt ping${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt ping${CLR_RST}
+  ${CLR_CMD}dockermt ping | cat${CLR_RST}
+USAGE
+      ;;
+    shell)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt shell${CLR_RST}
+Abre uma shell interativa no runtime central.
+Este comando e reservado ao central e nao pode ser executado direto dentro de instancia.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt shell${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt shell${CLR_RST}
+  ${CLR_CMD}dockermt @onnxlab shell${CLR_RST}
+USAGE
+      ;;
+    instance|whoami)
+      shift || true
+      if [ "$#" -eq 0 ]; then
+        _instance_usage
+      else
+        _instance_topic_usage "$1"
+      fi
+      ;;
+    install)
+      runtime_install help
+      ;;
+    import)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt @NOME import${CLR_RST}
+Importa indicadores, experts, services e outros itens da base atual para uma instancia ja criada.
+Este e o caminho publico para trazer recursos para uma instancia.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt @NOME import${CLR_RST} --indicator INDICADOR
+  ${CLR_CMD}dockermt @NOME import${CLR_RST} --expert EXPERT
+  ${CLR_CMD}dockermt @NOME import${CLR_RST} --service SERVICE
+  ${CLR_CMD}dockermt @NOME import${CLR_RST} --indicator INDICADOR --expert EXPERT --service SERVICE
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt @onnxlab import --indicator DukaTickDll${CLR_RST}
+  ${CLR_CMD}dockermt @neuro import --expert NeuroNet_DNG${CLR_RST}
+  ${CLR_CMD}dockermt @mix import --indicator DerivadasLab --expert DerivadasLab --service ExampleService${CLR_RST}
+
+${CLR_HDR}Notes:${CLR_RST}
+  Para o usuario final, import substitui a necessidade de navegar pelo fluxo interno de addons.
+USAGE
+      ;;
+    project)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt project${CLR_RST}
+Projeto = repositorio Git dentro da instancia.
+Lista os projetos Git da instancia atual, ou consulta a malha central+instancias.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt project${CLR_RST}
+  ${CLR_CMD}dockermt project <PROJETO>${CLR_RST}
+  ${CLR_CMD}dockermt project log <PROJETO>${CLR_RST}
+  ${CLR_CMD}dockermt project json <PROJETO>${CLR_RST}
+  ${CLR_CMD}dockermt project network${CLR_RST}
+  ${CLR_CMD}dockermt project network instances${CLR_RST}
+  ${CLR_CMD}dockermt project network json${CLR_RST}
+  ${CLR_CMD}dockermt project network sync${CLR_RST}
+  ${CLR_CMD}dockermt project resume INSTANCIA [PROJETO]${CLR_RST}
+  ${CLR_CMD}dockermt @NOME project${CLR_RST}
+  ${CLR_CMD}dockermt @NOME project <PROJETO>${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt project${CLR_RST}
+  ${CLR_CMD}dockermt project meu-repo${CLR_RST}
+  ${CLR_CMD}dockermt project log meu-repo${CLR_RST}
+  ${CLR_CMD}dockermt project network${CLR_RST}
+  ${CLR_CMD}dockermt project network instances${CLR_RST}
+  ${CLR_CMD}dockermt project resume smoke meu-repo${CLR_RST}
+  ${CLR_CMD}dockermt @onnxlab project${CLR_RST}
+  ${CLR_CMD}dockermt @onnxlab project json meu-repo${CLR_RST}
+USAGE
+      ;;
+    container)
+      shift || true
+      if [ "$#" -eq 0 ]; then
+        _container_usage
+      else
+        _container_topic_usage "$1"
+      fi
+      ;;
+    dukascopy)
+      shift || true
+      if [ "$#" -eq 0 ]; then
+        _dukascopy_usage
+      else
+        _dukascopy_topic_usage "$1"
+      fi
+      ;;
+    *)
+      socket_cli help "$@"
+      ;;
+  esac
+}
+
+_container_topic_usage() {
+  case "${1:-}" in
+    status)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container status${CLR_RST}
+Mostra o runtime atual, a imagem atual e a URL publicada.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container status${CLR_RST}
+  ${CLR_CMD}dockermt container status${CLR_RST} NOME
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container status${CLR_RST}
+  ${CLR_CMD}dockermt container status dockermt-emptymod${CLR_RST}
+  ${CLR_CMD}dockermt container status | cat${CLR_RST}
+USAGE
+      ;;
+    up)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container up${CLR_RST}
+Sobe ou recria o runtime atual.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container up${CLR_RST}
+  ${CLR_CMD}dockermt container up${CLR_RST} NOME
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container up${CLR_RST}
+  ${CLR_CMD}dockermt container up dockermt-emptymod${CLR_RST}
+USAGE
+      ;;
+    open)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container open${CLR_RST}
+Abre o MetaTrader do runtime atual, ou de uma instancia nomeada, e informa a URL publicada.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container open${CLR_RST}
+  ${CLR_CMD}dockermt container open${CLR_RST} NOME
+  ${CLR_CMD}dockermt container open --url URL${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container open${CLR_RST}
+  ${CLR_CMD}dockermt container open dockermt-emptymod${CLR_RST}
+  ${CLR_CMD}dockermt container open --url http://localhost:3000${CLR_RST}
+USAGE
+      ;;
+    list)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container list${CLR_RST}
+Lista snapshots locais conhecidos do runtime.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container list${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container list${CLR_RST}
+  ${CLR_CMD}dockermt container list | sed -n '1,20p'${CLR_RST}
+USAGE
+      ;;
+    save)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container save${CLR_RST}
+Salva um snapshot local do runtime atual.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container save${CLR_RST} [ESTADO]
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container save${CLR_RST}
+  ${CLR_CMD}dockermt container save review-1${CLR_RST}
+  ${CLR_CMD}dockermt container save baseline${CLR_RST}
+USAGE
+      ;;
+    restore)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container restore${CLR_RST}
+Seleciona um snapshot salvo para restauracao na proxima subida.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container restore${CLR_RST} ESTADO
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container restore review-1${CLR_RST}
+  ${CLR_CMD}dockermt container restore baseline${CLR_RST}
+USAGE
+      ;;
+    commit)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container commit${CLR_RST}
+Cria um snapshot de imagem+volume com mensagem obrigatoria e nome opcional.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container commit -m "mensagem" [-n nome]${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container commit -m "review 1" -n review${CLR_RST}
+  ${CLR_CMD}dockermt container commit -m "baseline"${CLR_RST}
+USAGE
+      ;;
+    pull)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container pull${CLR_RST}
+Baixa um snapshot remoto e prepara seu volume vinculado.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container pull${CLR_RST} NOME-OU-TAG
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container pull review.v1-20260327-120000${CLR_RST}
+  ${CLR_CMD}dockermt container pull sindlinger/dockermt:review.v1-20260327-120000${CLR_RST}
+USAGE
+      ;;
+    push)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container push${CLR_RST}
+Publica um snapshot local no Docker Hub.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container push${CLR_RST} [NOME-OU-TAG]
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container push review.v1-20260327-120000${CLR_RST}
+  ${CLR_CMD}dockermt container push${CLR_RST}
+USAGE
+      ;;
+    select)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container select${CLR_RST}
+Seleciona qual snapshot sera usado na proxima subida.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container select${CLR_RST} SNAPSHOT
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container select review.v1-20260327-120000${CLR_RST}
+  ${CLR_CMD}dockermt container select baseline.v1-20260327-120000${CLR_RST}
+USAGE
+      ;;
+    snapshots)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt container snapshots${CLR_RST}
+Lista snapshots com marcacoes ACTIVE, SELECTED e LATEST.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt container snapshots${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt container snapshots${CLR_RST}
+  ${CLR_CMD}dockermt container snapshots | sed -n '1,20p'${CLR_RST}
+USAGE
+      ;;
+    *)
+      echo "ERR: subcomando desconhecido em 'dockermt help container': ${1:-}" >&2
+      _container_usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+_instance_topic_usage() {
+  case "${1:-}" in
+    show|name|whoami)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt instance${CLR_RST}
+Mostra apenas o nome curto da instancia atual (parte apos ${CLR_CMD}dockermt-${CLR_RST}).
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt instance${CLR_RST}
+  ${CLR_CMD}dockermt whoami${CLR_RST}
+  ${CLR_CMD}dockermt instance show${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt instance${CLR_RST}
+  ${CLR_CMD}dockermt instance show${CLR_RST}
+USAGE
+      ;;
+    list|instances|ls)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt instance list${CLR_RST}
+Lista instancias dockermt conhecidas com nome, status, portas, imagem e volume.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt instance list${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt instance list${CLR_RST}
+  ${CLR_CMD}dockermt instance list | sed -n '1,20p'${CLR_RST}
+USAGE
+      ;;
+    factory)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt instance factory${CLR_RST}
+Mostra a base factory de workspace usada por novas instancias.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt instance factory${CLR_RST}
+  ${CLR_CMD}dockermt instance factory refresh${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt instance factory${CLR_RST}
+  ${CLR_CMD}dockermt instance factory refresh${CLR_RST}
+USAGE
+      ;;
+    create)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt instance create${CLR_RST}
+Cria ou reutiliza uma instancia filha.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt instance create${CLR_RST} NOME [OPTIONS]
+  ${CLR_CMD}dockermt instance create${CLR_RST} NOME [OPTIONS] --indicator ITEM
+  ${CLR_CMD}dockermt instance create${CLR_RST} NOME [OPTIONS] --expert ITEM
+  ${CLR_CMD}dockermt instance create${CLR_RST} NOME [OPTIONS] --service ITEM
+
+${CLR_HDR}Arguments:${CLR_RST}
+  NOME                         Nome da instancia filha.
+
+${CLR_HDR}Options:${CLR_RST}
+  ${CLR_CMD}--color${CLR_RST} COR             Define a cor do banner da instancia.
+  ${CLR_CMD}--text-color${CLR_RST} COR        Define a cor do texto do banner.
+  ${CLR_CMD}-u, --user${CLR_RST} USER         Cria a instancia com usuario Docker especifico (ex.: 0, 1000:1000).
+  ${CLR_CMD}--indicator${CLR_RST} ITEM        Importa indicador especifico na criacao.
+  ${CLR_CMD}--expert${CLR_RST} ITEM           Importa expert especifico na criacao.
+  ${CLR_CMD}--service${CLR_RST} ITEM          Importa service especifico na criacao.
+  ${CLR_CMD}--include${CLR_RST} ITEM          Importa include especifico na criacao.
+  ${CLR_CMD}--library${CLR_RST} ITEM          Importa library especifica na criacao.
+  ${CLR_CMD}--script${CLR_RST} ITEM           Importa script especifico na criacao.
+  ${CLR_CMD}--files${CLR_RST} ITEM            Importa arquivo especifico em MQL5/Files.
+  ${CLR_CMD}--volume${CLR_RST} VOLUME         Reutiliza um volume de workspace especifico.
+  ${CLR_CMD}--snapshot${CLR_RST} SNAPSHOT     Usa um snapshot especifico como base.
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt instance create EmptyMod${CLR_RST}
+  ${CLR_CMD}dockermt instance create harm --color gray --text-color black${CLR_RST}
+  ${CLR_CMD}dockermt instance create models -u 0${CLR_RST}
+  ${CLR_CMD}dockermt instance create onnxlab --indicator rsi_laguerre${CLR_RST}
+  ${CLR_CMD}dockermt instance create neuro --expert NeuroNet_DNG${CLR_RST}
+  ${CLR_CMD}dockermt instance create worker --service ExampleService${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod help${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod project${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod shell${CLR_RST}
+  ${CLR_CMD}dockermt @emptymod chart list${CLR_RST}
+
+${CLR_HDR}Notes:${CLR_RST}
+  Indicators e experts custom nascem limpos.
+  A instancia nasce da base factory; use flags --include/--library/--service para trazer itens adicionais.
+USAGE
+      ;;
+    rename)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt instance rename${CLR_RST}
+Renomeia a instancia atual.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt instance rename${CLR_RST} NOVO_NOME
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt instance rename alpha2${CLR_RST}
+
+${CLR_HDR}Notes:${CLR_RST}
+  O rename so pode ser executado localmente dentro da propria instancia alvo.
+  O comando de rename nao aceita roteamento com ${CLR_CMD}@INSTANCIA${CLR_RST}.
+USAGE
+      ;;
+    *)
+      echo "ERR: subcomando desconhecido em 'dockermt help instance': ${1:-}" >&2
+      _instance_usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+_dukascopy_topic_usage() {
+  case "${1:-}" in
+    sync)
+      cat <<USAGE
+${CLR_HDR}Command:${CLR_RST} ${CLR_CMD}dockermt dukascopy sync${CLR_RST}
+Coleta credenciais demo validas e atualiza o runtime MT5 local.
+
+${CLR_HDR}Usage:${CLR_RST}
+  ${CLR_CMD}dockermt dukascopy sync${CLR_RST}
+
+${CLR_HDR}Examples:${CLR_RST}
+  ${CLR_CMD}dockermt dukascopy sync${CLR_RST}
+  ${CLR_CMD}dockermt dukascopy sync | cat${CLR_RST}
+USAGE
+      ;;
+    *)
+      echo "ERR: subcomando desconhecido em 'dockermt help dukascopy': ${1:-}" >&2
+      _dukascopy_usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+socket_cli() {
+  export CMDMT_BRAND=dockermt
+  export CMDMT_DOCKER_DIR="${CMDMT_DOCKER_DIR:-/config/dockermt}"
+  export DOCKERMT_TITLE="DockerMT"
+  export DOCKERMT_VERSION="${DOCKERMT_VERSION_CURRENT}"
+  export DOCKERMT_VERSION_FILE="${DOCKERMT_VERSION_FILE}"
+  export DOCKERMT_HELP_BASE="dockermt"
+  export DOCKERMT_RUNTIME_MODE="container-only"
+  exec /usr/local/bin/node23 /opt/dockermt-full/dist/dockermt.js "$@"
+}
+
+require_docker() {
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "ERR: docker CLI nao encontrado no container." >&2
+    exit 127
+  fi
+  if [ ! -S "$DOCKER_SOCKET_PATH" ]; then
+    echo "ERR: docker socket nao esta montado em '$DOCKER_SOCKET_PATH'." >&2
+    exit 127
+  fi
+}
+
+resolve_current_runtime_container() {
+  if [ -n "${DOCKERMT_CONTAINER_NAME:-}" ]; then
+    printf '%s\n' "$DOCKERMT_CONTAINER_NAME"
+    return 0
+  fi
+  if command -v docker >/dev/null 2>&1 && [ -S "$DOCKER_SOCKET_PATH" ]; then
+    local resolved_name
+    resolved_name="$(docker inspect "$HOSTNAME" --format '{{.Name}}' 2>/dev/null | sed 's#^/##')"
+    if [ -n "$resolved_name" ]; then
+      printf '%s\n' "$resolved_name"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$DEFAULT_CONTAINER_FALLBACK"
+}
+
+runtime_container_label() {
+  local container_name="${1:-}"
+  local key="${2:-}"
+  local value=""
+  [ -n "$container_name" ] || return 0
+  [ -n "$key" ] || return 0
+  if command -v docker >/dev/null 2>&1 && [ -S "$DOCKER_SOCKET_PATH" ]; then
+    value="$(docker inspect "$container_name" --format "{{index .Config.Labels \"$key\"}}" 2>/dev/null || true)"
+    case "$value" in
+      "<no value>"|"")
+        value=""
+        ;;
+    esac
+  fi
+  printf '%s\n' "$value"
+}
+
+runtime_parent_container() {
+  local container_name="${1:-}"
+  [ -n "$container_name" ] || container_name="$(resolve_current_runtime_container)"
+  runtime_container_label "$container_name" "dockermt.runtime.parent"
+}
+
+runtime_is_instance() {
+  local container_name="${1:-}"
+  local marker short_name env_instance
+  [ -n "$container_name" ] || container_name="$(resolve_current_runtime_container)"
+  marker="$(runtime_container_label "$container_name" "dockermt.runtime")"
+  if [ "$marker" = "1" ]; then
+    return 0
+  fi
+  env_instance="$(sanitize_snapshot_name "${DOCKERMT_INSTANCE_NAME:-}")"
+  if [ -n "$env_instance" ]; then
+    short_name="$(runtime_short_name "$container_name")"
+    if [ "$short_name" = "$env_instance" ]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+runtime_short_name() {
+  local container_name="${1:-}"
+  [ -n "$container_name" ] || container_name="$(resolve_current_runtime_container)"
+  case "$container_name" in
+    dockermt-*)
+      printf '%s\n' "${container_name#dockermt-}"
+      ;;
+    *)
+      printf '%s\n' "$container_name"
+      ;;
+  esac
+}
+
+resolve_central_runtime_container() {
+  local current_name parent_name candidate
+  current_name="$(resolve_current_runtime_container)"
+  parent_name="$(runtime_parent_container "$current_name")"
+  if [ -n "$parent_name" ] && container_exists "$parent_name"; then
+    printf '%s\n' "$parent_name"
+    return 0
+  fi
+  candidate="$(docker ps --filter 'label=dockermt.role=central' --format '{{.Names}}' 2>/dev/null | head -n 1)"
+  if [ -n "$candidate" ] && container_exists "$candidate"; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  candidate="$(docker ps --filter 'label=dockermt.central=1' --format '{{.Names}}' 2>/dev/null | head -n 1)"
+  if [ -n "$candidate" ] && container_exists "$candidate"; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  printf '%s\n' "$current_name"
+}
+
+normalize_runtime_target() {
+  local raw="${1:-}" safe="" candidate="" current_name="" current_short=""
+  if [ -z "$raw" ]; then
+    resolve_current_runtime_container
+    return 0
+  fi
+  case "$raw" in
+    @*)
+      raw="${raw#@}"
+      ;;
+  esac
+  current_name="$(resolve_current_runtime_container)"
+  safe="$(sanitize_snapshot_name "$raw")"
+  current_short="$(runtime_short_name "$current_name")"
+  if [ "$raw" = "$current_name" ] || { [ -n "$safe" ] && [ "$safe" = "$current_short" ]; }; then
+    printf '%s\n' "$current_name"
+    return 0
+  fi
+  if [ "$raw" = "central" ]; then
+    resolve_central_runtime_container
+    return 0
+  fi
+  if docker inspect "$raw" >/dev/null 2>&1; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  if [ -n "$safe" ]; then
+    candidate="$(docker ps -a --filter "label=dockermt.role=instance" --filter "label=dockermt.instance.name=${safe}" --format '{{.Names}}' 2>/dev/null | head -n 1 || true)"
+    if [ -n "$candidate" ] && docker inspect "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    candidate="$(docker ps -a --filter "label=dockermt.runtime=1" --filter "label=dockermt.runtime.name=${safe}" --format '{{.Names}}' 2>/dev/null | head -n 1 || true)"
+    if [ -n "$candidate" ] && docker inspect "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    if docker inspect "dockermt-${safe}" >/dev/null 2>&1; then
+      printf 'dockermt-%s\n' "$safe"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$raw"
+}
+
+container_exists() {
+  local container_name="${1:-}"
+  local current_name=""
+  [ -n "$container_name" ] || return 1
+  current_name="$(resolve_current_runtime_container)"
+  if [ "$container_name" = "$current_name" ]; then
+    return 0
+  fi
+  docker inspect "$container_name" >/dev/null 2>&1
+}
+
+container_host_port() {
+  local container_name="${1:-}"
+  local container_port="${2:-}"
+  local fallback="${3:-}"
+  local host_port=""
+  local current_name=""
+  current_name="$(resolve_current_runtime_container)"
+  if [ -n "$container_name" ] && [ "$container_name" = "$current_name" ]; then
+    case "$container_port" in
+      3000)
+        if [ -n "${DOCKERMT_HOST_WEB_PORT:-}" ]; then
+          printf '%s\n' "$DOCKERMT_HOST_WEB_PORT"
+          return 0
+        fi
+        ;;
+      1122)
+        if [ -n "${DOCKERMT_HOST_TELNET_PORT:-}" ]; then
+          printf '%s\n' "$DOCKERMT_HOST_TELNET_PORT"
+          return 0
+        fi
+        ;;
+      8001)
+        if [ -n "${DOCKERMT_HOST_PY_PORT:-}" ]; then
+          printf '%s\n' "$DOCKERMT_HOST_PY_PORT"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  if [ -n "$container_name" ] && [ -n "$container_port" ]; then
+    host_port="$(docker inspect "$container_name" --format "{{with index .NetworkSettings.Ports \"${container_port}/tcp\"}}{{(index . 0).HostPort}}{{end}}" 2>/dev/null || true)"
+  fi
+  if [ -n "$host_port" ]; then
+    printf '%s\n' "$host_port"
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
+container_env_value() {
+  local container_name="${1:-}"
+  local env_key="${2:-}"
+  [ -n "$container_name" ] || return 0
+  [ -n "$env_key" ] || return 0
+  docker inspect "$container_name" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | sed -n "s/^${env_key}=//p" \
+    | tail -n 1
+}
+
+migrate_instance_workspace_dirs_in_volume() {
+  local target_volume="${1:-}"
+  local old_slug="${2:-}"
+  local new_slug="${3:-}"
+  [ -n "$target_volume" ] || return 1
+  [ -n "$old_slug" ] || return 1
+  [ -n "$new_slug" ] || return 1
+  [ "$old_slug" != "$new_slug" ] || return 0
+  docker run --rm \
+    -e "MQL5_ROOT_REL=${DOCKERMT_MQL5_ROOT_REL}" \
+    -e "OLD_SLUG=${old_slug}" \
+    -e "NEW_SLUG=${new_slug}" \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -v "${target_volume}:/config" \
+    alpine sh -lc '
+      set -eu
+      root="/config/${MQL5_ROOT_REL}"
+      for category in Files Experts Indicators Services Include Scripts Libraries; do
+        base="$root/$category"
+        src="$base/$OLD_SLUG"
+        dst="$base/$NEW_SLUG"
+        mkdir -p "$base"
+        if [ -e "$src" ]; then
+          if [ -e "$dst" ]; then
+            cd "$src" && tar cf - . | (cd "$dst" && tar xf -)
+            rm -rf "$src"
+          else
+            mv "$src" "$dst"
+          fi
+        else
+          mkdir -p "$dst"
+        fi
+      done
+      chown -R "${RUNTIME_UID}:${RUNTIME_GID}" \
+        "$root/Files" "$root/Experts" "$root/Indicators" "$root/Include" "$root/Scripts" "$root/Libraries" 2>/dev/null || true
+      chown -R 0:0 "$root/Services" 2>/dev/null || true
+    '
+}
+
+runtime_instance_rename_apply() {
+  require_docker
+  local old_ref="${1:-}"
+  local new_raw="${2:-}"
+  [ -n "$old_ref" ] || { echo "ERR: uso interno: dockermt _instance-rename <instancia-atual> <novo-nome>" >&2; return 1; }
+  [ -n "$new_raw" ] || { echo "ERR: uso interno: dockermt _instance-rename <instancia-atual> <novo-nome>" >&2; return 1; }
+
+  local old_container old_short new_short new_container
+  local image config_volume state_volume parent_container old_user
+  local telnet_port web_port py_port runtime_status
+  local -a runtime_user_args=()
+  local runtime_src_dockermt runtime_src_shell runtime_src_args runtime_src_dispatch
+
+  old_container="$(normalize_runtime_target "$old_ref")"
+  container_exists "$old_container" || { echo "ERR: instancia nao localizada: $old_ref" >&2; return 1; }
+  runtime_is_instance "$old_container" || { echo "ERR: alvo nao e instancia DockerMT: $old_container" >&2; return 1; }
+
+  old_short="$(runtime_short_name "$old_container")"
+  new_short="$(sanitize_snapshot_name "$new_raw")"
+  [ -n "$new_short" ] || { echo "ERR: novo nome invalido." >&2; return 1; }
+  if [ "$new_short" = "$old_short" ]; then
+    echo "[dockermt] rename sem alteracao: ${old_short}"
+    return 0
+  fi
+
+  new_container="$(instance_container_name_from_slug "$new_short")"
+  if container_exists "$new_container"; then
+    echo "ERR: ja existe uma instancia com este nome: $new_short" >&2
+    return 1
+  fi
+
+  image="$(current_container_image "$old_container")"
+  old_user="$(docker inspect "$old_container" --format '{{.Config.User}}' 2>/dev/null || true)"
+  config_volume="$(current_container_config_volume "$old_container")"
+  state_volume="$(container_env_value "$old_container" "DOCKERMT_STATE_VOLUME")"
+  parent_container="$(runtime_parent_container "$old_container")"
+  telnet_port="$(container_host_port "$old_container" "1122" "")"
+  web_port="$(container_host_port "$old_container" "3000" "")"
+  py_port="$(container_host_port "$old_container" "8001" "")"
+  runtime_status="$(current_container_status "$old_container")"
+
+  [ -n "$image" ] || { echo "ERR: nao foi possivel identificar a imagem da instancia atual." >&2; return 1; }
+  [ -n "$config_volume" ] || { echo "ERR: nao foi possivel identificar o volume /config da instancia atual." >&2; return 1; }
+  [ -n "$state_volume" ] || state_volume="$(instance_state_volume_from_slug "$old_short")"
+  [ -n "$parent_container" ] || parent_container="$(resolve_current_runtime_container)"
+  [ -n "$telnet_port" ] || { echo "ERR: porta host Telnet da instancia atual nao encontrada." >&2; return 1; }
+  [ -n "$web_port" ] || { echo "ERR: porta host Web da instancia atual nao encontrada." >&2; return 1; }
+  [ -n "$py_port" ] || { echo "ERR: porta host Python da instancia atual nao encontrada." >&2; return 1; }
+  if [ -n "$old_user" ]; then
+    runtime_user_args=(--user "$old_user")
+  fi
+
+  echo "[dockermt] rename: ${old_short} -> ${new_short}"
+  if [ "$runtime_status" = "running" ]; then
+    echo "[dockermt] parando instancia atual..."
+    docker stop "$old_container" >/dev/null
+  fi
+
+  echo "[dockermt] migrando diretorios da instancia..."
+  migrate_instance_workspace_dirs_in_volume "$config_volume" "$old_short" "$new_short"
+  prepare_codex_layout_in_volume "$config_volume" "$new_short" reuse
+
+  echo "[dockermt] criando container renomeado..."
+  if ! docker run -d \
+    --name "$new_container" \
+    --hostname "$new_container" \
+    --gpus all \
+    "${runtime_user_args[@]}" \
+    -e "TITLE=DockerMT [$new_short]" \
+    -e "DOCKERMT_CONTAINER_NAME=$new_container" \
+    -e "DOCKERMT_INSTANCE_NAME=$new_short" \
+    -e "DOCKERMT_STATE_VOLUME=$state_volume" \
+    -e "TELNETMT_PORT=1122" \
+    -e "MT5_WEB_PORT=3000" \
+    -e "MT5_PY_PORT=8001" \
+    -e "DOCKERMT_HOST_TELNET_PORT=$telnet_port" \
+    -e "DOCKERMT_HOST_WEB_PORT=$web_port" \
+    -e "DOCKERMT_HOST_PY_PORT=$py_port" \
+    -e "DOCKERMT_SNAPSHOT_REPO=$SNAPSHOT_REPO" \
+    -e "DOCKERMT_SNAPSHOT_VOLUME_PREFIX=$SNAPSHOT_VOLUME_PREFIX" \
+    -e "DOCKERMT_PULL_REPO=$PULL_REPO" \
+    -e "DOCKERMT_DOCKER_SOCKET_PATH=$DOCKER_SOCKET_PATH" \
+    -v "${config_volume}:/config" \
+    -v "${DOCKER_SOCKET_PATH}:${DOCKER_SOCKET_PATH}" \
+    -p "${telnet_port}:1122" \
+    -p "${web_port}:3000" \
+    -p "${py_port}:8001" \
+    --label "dockermt.role=instance" \
+    --label "dockermt.instance.name=$new_short" \
+    --label "dockermt.node.role=instance" \
+    --label "dockermt.node.name=$new_short" \
+    --label "dockermt.node.parent=$parent_container" \
+    --label "dockermt.runtime=1" \
+    --label "dockermt.runtime.name=$new_short" \
+    --label "dockermt.runtime.parent=$parent_container" \
+    --label "dockermt.runtime.config-volume=$config_volume" \
+    "$image" >/dev/null; then
+    echo "ERR: falha ao criar container renomeado; tentando religar a instancia antiga." >&2
+    docker start "$old_container" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  echo "[dockermt] atualizando runtime..."
+  runtime_src_dockermt="/usr/local/bin/dockermt"
+  runtime_src_shell="/usr/local/bin/dockermt-instance-shell"
+  runtime_src_args="/opt/dockermt-full/dist/lib/args.js"
+  runtime_src_dispatch="/opt/dockermt-full/dist/lib/dispatch.js"
+  if [ -f /config/.dockermt/patches/runtime/dockermt ]; then
+    runtime_src_dockermt="/config/.dockermt/patches/runtime/dockermt"
+  fi
+  if [ -f /config/.dockermt/patches/runtime/dockermt-instance-shell ]; then
+    runtime_src_shell="/config/.dockermt/patches/runtime/dockermt-instance-shell"
+  fi
+  if [ -f /config/.dockermt/patches/runtime/args.js ]; then
+    runtime_src_args="/config/.dockermt/patches/runtime/args.js"
+  fi
+  if [ -f /config/.dockermt/patches/runtime/dispatch.js ]; then
+    runtime_src_dispatch="/config/.dockermt/patches/runtime/dispatch.js"
+  fi
+  docker cp "$runtime_src_dockermt" "${new_container}:/usr/local/bin/dockermt"
+  if [ -f "$runtime_src_shell" ]; then
+    docker cp "$runtime_src_shell" "${new_container}:/usr/local/bin/dockermt-instance-shell"
+  fi
+  if [ -f "$runtime_src_args" ]; then
+    docker cp "$runtime_src_args" "${new_container}:/opt/dockermt-full/dist/lib/args.js"
+  fi
+  if [ -f "$runtime_src_dispatch" ]; then
+    docker cp "$runtime_src_dispatch" "${new_container}:/opt/dockermt-full/dist/lib/dispatch.js"
+  fi
+  docker exec "$new_container" sh -lc 'chmod 755 /usr/local/bin/dockermt /usr/local/bin/dockermt-instance-shell 2>/dev/null || true'
+  docker exec "$new_container" /usr/local/bin/dockermt-project-meta init >/dev/null 2>&1 || true
+
+  docker rm "$old_container" >/dev/null 2>&1 || true
+  rename_instance_mt5_window_in_container "$new_container" ":1" "$new_short" >/dev/null 2>&1 || true
+
+  cat <<EOF2
+[dockermt] instancia renomeada.
+from         : $old_container
+to           : $new_container
+config-volume: $config_volume
+state-volume : $state_volume
+url          : $(runtime_web_url "$new_container")
+shell        : dockermt @$new_short shell
+open         : dockermt @$new_short container open
+status       : dockermt @$new_short container status
+EOF2
+}
+
+runtime_instance_rename_request() {
+  require_docker
+  local new_raw="${1:-}"
+  [ -n "$new_raw" ] || { echo "ERR: uso: dockermt instance rename <novo-nome>" >&2; return 1; }
+
+  local current_name current_short new_short central_name
+  current_name="$(resolve_current_runtime_container)"
+  runtime_is_instance "$current_name" || {
+    echo "ERR: 'dockermt instance rename' so pode ser usado dentro de uma instancia." >&2
+    return 1
+  }
+  if [ "${ROUTED_EXPLICIT_TARGET:-0}" = "1" ]; then
+    echo "ERR: 'dockermt instance rename' so pode ser executado localmente dentro da instancia (sem @)." >&2
+    return 1
+  fi
+
+  current_short="$(runtime_short_name "$current_name")"
+  new_short="$(sanitize_snapshot_name "$new_raw")"
+  [ -n "$new_short" ] || { echo "ERR: novo nome invalido." >&2; return 1; }
+  if [ "$new_short" = "$current_short" ]; then
+    echo "[dockermt] rename sem alteracao: ${current_short}"
+    return 0
+  fi
+
+  central_name="$(resolve_central_runtime_container)"
+  [ -n "$central_name" ] || { echo "ERR: runtime central nao localizado para processar o rename." >&2; return 1; }
+  if ! docker exec -d "$central_name" /usr/local/bin/dockermt _instance-rename "$current_name" "$new_short" >/dev/null 2>&1; then
+    echo "ERR: falha ao enviar a solicitacao de rename para o runtime central." >&2
+    return 1
+  fi
+
+  cat <<EOF2
+[dockermt] solicitacao de rename enviada.
+from         : $current_short
+to           : $new_short
+observe      : dockermt instance list
+novo acesso  : dockermt @$new_short ...
+EOF2
+}
+
+docker_exec_runtime_cli() {
+  local target_container="${1:-}"
+  shift || true
+  [ -n "$target_container" ] || return 1
+  local routed_explicit="${DOCKERMT_ROUTED_EXPLICIT_TARGET:-0}"
+  local -a exec_flags=(-i)
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec_flags=(-it)
+  fi
+  docker exec \
+    "${exec_flags[@]}" \
+    -e "DOCKERMT_CONTAINER_NAME=$target_container" \
+    -e "DOCKERMT_ROUTED_EXPLICIT_TARGET=$routed_explicit" \
+    -e "DOCKERMT_APP_DISPLAY=${DOCKERMT_APP_DISPLAY:-}" \
+    -e "DOCKERMT_FORCE_COLOR=${DOCKERMT_FORCE_COLOR:-1}" \
+    -e "CLICOLOR_FORCE=${CLICOLOR_FORCE:-1}" \
+    -e "COLUMNS=${COLUMNS:-120}" \
+    -e "LINES=${LINES:-40}" \
+    "$target_container" /usr/local/bin/dockermt "$@"
+}
+
+docker_exec_runtime_shell() {
+  local target_container="${1:-}"
+  local instance_name="${2:-$target_container}"
+  shift || true
+  shift || true
+  [ -n "$target_container" ] || return 1
+  local -a exec_flags=(-i)
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec_flags=(-it)
+  fi
+  docker exec \
+    "${exec_flags[@]}" \
+    -u "${DOCKERMT_RUNTIME_UID}:${DOCKERMT_RUNTIME_GID}" \
+    -e "DOCKERMT_CONTAINER_NAME=$target_container" \
+    -e "DOCKERMT_INSTANCE_NAME=$instance_name" \
+    -e "DOCKERMT_CODEX_HOME=/config/${DOCKERMT_CODEX_HOME_REL}" \
+    -e "DOCKERMT_CODEX_SESSION_DIR=/config/${DOCKERMT_CODEX_SESSION_REL}" \
+    -e "DOCKERMT_CODEX_DOCS_DIR=/config/${DOCKERMT_CODEX_DOCS_REL}" \
+    -e "DOCKERMT_CODEX_DOCS_STATUS_FILE=/config/.dockermt/docs/status.txt" \
+    -e "DOCKERMT_EXTENSION_COMMANDS_DIR=/config/${DOCKERMT_EXTENSION_COMMANDS_REL}" \
+    -e "DOCKERMT_MQL5_DIR=/config/${DOCKERMT_MQL5_ROOT_REL}" \
+    -e "DOCKERMT_CODEX_PROJECT_DIR=/config/${DOCKERMT_CODEX_SESSION_REL}/project" \
+    -e "DOCKERMT_PROJECT_META_DIR=/config/.dockermt/project" \
+    -e "DOCKERMT_PROJECT_META_BIN=/usr/local/bin/dockermt-project-meta" \
+    -e "DOCKERMT_APP_DISPLAY=${DOCKERMT_APP_DISPLAY:-}" \
+    -e "DOCKERMT_FORCE_COLOR=${DOCKERMT_FORCE_COLOR:-1}" \
+    -e "CLICOLOR_FORCE=${CLICOLOR_FORCE:-1}" \
+    -e "COLUMNS=${COLUMNS:-120}" \
+    -e "LINES=${LINES:-40}" \
+    -e "DOCKERMT_INSTANCE_SHELL=$target_container" \
+    "$target_container" /usr/local/bin/dockermt-instance-shell "$@"
+}
+
+runtime_shell_current() {
+  require_docker
+  local current_name parent_name instance_name runtime_uid runtime_gid
+  current_name="$(resolve_current_runtime_container)"
+  parent_name="$(runtime_parent_container "$current_name")"
+  if [ -n "$parent_name" ] && [ "$parent_name" != "$current_name" ]; then
+    echo "ERR: 'dockermt shell' so pode ser executado no runtime central." >&2
+    echo "Use: dockermt @$(runtime_short_name "$current_name") shell" >&2
+    return 1
+  fi
+  instance_name="$(runtime_short_name "$current_name")"
+  runtime_uid="0"
+  runtime_gid="0"
+  DOCKERMT_RUNTIME_UID="$runtime_uid" DOCKERMT_RUNTIME_GID="$runtime_gid" \
+    docker_exec_runtime_shell "$current_name" "$instance_name" "$@"
+}
+
+runtime_ensure_running() {
+  local target_container="${1:-}"
+  local status
+  [ -n "$target_container" ] || return 1
+  if [ "$target_container" = "$(resolve_current_runtime_container)" ]; then
+    return 0
+  fi
+  status="$(current_container_status "$target_container")"
+  [ -n "$status" ] || return 1
+  if [ "$status" != "running" ]; then
+    docker start "$target_container" >/dev/null
+  fi
+}
+
+project_network_registry_refresh() {
+  require_docker
+  local central_name
+  central_name="$(resolve_central_runtime_container)"
+  mkdir -p "$DOCKERMT_PROJECTS_REGISTRY_DIR"
+  python3 - "$central_name" "$DOCKERMT_PROJECTS_NETWORK_FILE" "$DOCKERMT_PROJECTS_NETWORK_EVENTS_FILE" <<'PY'
+import datetime as _dt
+import json
+import os
+import subprocess
+import sys
+
+central_name, out_json, out_events = sys.argv[1:4]
+
+
+def now():
+    return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def run(cmd):
+    return subprocess.run(cmd, text=True, capture_output=True)
+
+
+def inspect_container(name):
+    r = run(["docker", "inspect", name])
+    if r.returncode != 0:
+        return None
+    try:
+        arr = json.loads(r.stdout)
+        if isinstance(arr, list) and arr:
+            return arr[0]
+    except Exception:
+        return None
+    return None
+
+
+def host_port(inspect_obj, port_key):
+    ports = ((inspect_obj or {}).get("NetworkSettings") or {}).get("Ports") or {}
+    mappings = ports.get(port_key) or []
+    if isinstance(mappings, list) and mappings:
+        first = mappings[0] or {}
+        value = first.get("HostPort")
+        if value:
+            return str(value)
+    return "-"
+
+
+def parse_projects_table(table_text):
+    rows = []
+    lines = [ln for ln in table_text.splitlines() if ln.strip()]
+    if not lines:
+        return rows
+    for line in lines[1:]:
+        cols = line.split("\t")
+        if len(cols) < 6:
+            continue
+        rows.append(
+            {
+                "project_id": cols[0],
+                "repo_name": cols[1],
+                "last_access": cols[2],
+                "codex_session": cols[3],
+                "present": cols[4],
+                "path": cols[5],
+            }
+        )
+    return rows
+
+
+containers_result = run(["docker", "ps", "-a", "--format", "{{.Names}}"])
+container_names = [ln.strip() for ln in containers_result.stdout.splitlines() if ln.strip()]
+
+items = []
+for name in container_names:
+    obj = inspect_container(name)
+    if not obj:
+        continue
+    labels = (obj.get("Config") or {}).get("Labels") or {}
+    is_runtime_instance = labels.get("dockermt.runtime") == "1"
+    parent = labels.get("dockermt.runtime.parent") or ""
+    if name != central_name:
+        if not is_runtime_instance:
+            continue
+        if parent and parent != central_name:
+            continue
+    state = (obj.get("State") or {}).get("Status") or "unknown"
+    running = state == "running"
+    instance_key = labels.get("dockermt.runtime.name") or (name[9:] if name.startswith("dockermt-") else name)
+    entry = {
+        "container": name,
+        "instance": instance_key,
+        "scope": "central" if name == central_name else "instance",
+        "parent": parent if name != central_name else "",
+        "status": state,
+        "running": running,
+        "web_port": host_port(obj, "3000/tcp"),
+        "telnet_port": host_port(obj, "1122/tcp"),
+        "python_port": host_port(obj, "8001/tcp"),
+        "codex_sessions_total": 0,
+        "meta": {},
+        "projects": [],
+        "errors": [],
+    }
+    if running:
+        meta_result = run(["docker", "exec", name, "/usr/local/bin/dockermt-project-meta", "json-instance"])
+        if meta_result.returncode == 0 and meta_result.stdout.strip():
+            try:
+                entry["meta"] = json.loads(meta_result.stdout)
+            except Exception as exc:
+                entry["errors"].append(f"meta-json: {exc}")
+        else:
+            stderr = (meta_result.stderr or "").strip()
+            if stderr:
+                entry["errors"].append(stderr)
+        projects_result = run(["docker", "exec", name, "/usr/local/bin/dockermt-project-meta", "list-projects"])
+        if projects_result.returncode == 0:
+            entry["projects"] = parse_projects_table(projects_result.stdout or "")
+        else:
+            stderr = (projects_result.stderr or "").strip()
+            if stderr:
+                entry["errors"].append(stderr)
+        events_result = run(["docker", "exec", name, "/usr/local/bin/dockermt-project-meta", "log-instance"])
+        if events_result.returncode == 0:
+            sessions_total = 0
+            for line in (events_result.stdout or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(item, dict) and item.get("event") == "start-codex":
+                    sessions_total += 1
+            entry["codex_sessions_total"] = sessions_total
+        else:
+            stderr = (events_result.stderr or "").strip()
+            if stderr:
+                entry["errors"].append(stderr)
+    items.append(entry)
+
+items.sort(key=lambda x: (0 if x.get("scope") == "central" else 1, x.get("instance") or x.get("container")))
+generated_at = now()
+payload = {
+    "kind": "dockermt-network-projects",
+    "generated_at": generated_at,
+    "central": central_name,
+    "instances": items,
+}
+os.makedirs(os.path.dirname(out_json), exist_ok=True)
+with open(out_json, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, ensure_ascii=True, indent=2)
+    fh.write("\n")
+projects_total = sum(len(it.get("projects") or []) for it in items)
+event = {
+    "timestamp": generated_at,
+    "event": "network-sync",
+    "central": central_name,
+    "instances": len(items),
+    "projects_total": projects_total,
+}
+with open(out_events, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, ensure_ascii=True) + "\n")
+print(f"central      : {central_name}")
+print(f"instances    : {len(items)}")
+print(f"projects     : {projects_total}")
+print(f"registry     : {out_json}")
+PY
+}
+
+project_network_registry_print_instances() {
+  [ -f "$DOCKERMT_PROJECTS_NETWORK_FILE" ] || project_network_registry_refresh >/dev/null
+  python3 - "$DOCKERMT_PROJECTS_NETWORK_FILE" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+if not os.path.exists(path):
+    raise SystemExit("ERR: registry de rede nao encontrado.")
+obj = json.load(open(path, "r", encoding="utf-8"))
+instances = obj.get("instances") or []
+print("INSTANCE\tSCOPE\tSTATUS\tWEB\tTELNET\tPYTHON\tPROJECTS\tSESSIONS\tLAST_CODEX\tLAST_PROJECT")
+for item in instances:
+    meta = item.get("meta") or {}
+    print(
+        "\t".join(
+            [
+                str(item.get("instance") or "-"),
+                str(item.get("scope") or "-"),
+                str(item.get("status") or "-"),
+                str(item.get("web_port") or "-"),
+                str(item.get("telnet_port") or "-"),
+                str(item.get("python_port") or "-"),
+                str(len(item.get("projects") or [])),
+                str(item.get("codex_sessions_total") or 0),
+                str(meta.get("last_codex_session_id") or "-"),
+                str(meta.get("last_project_id") or "-"),
+            ]
+        )
+    )
+PY
+}
+
+project_network_registry_print_projects() {
+  [ -f "$DOCKERMT_PROJECTS_NETWORK_FILE" ] || project_network_registry_refresh >/dev/null
+  python3 - "$DOCKERMT_PROJECTS_NETWORK_FILE" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+if not os.path.exists(path):
+    raise SystemExit("ERR: registry de rede nao encontrado.")
+obj = json.load(open(path, "r", encoding="utf-8"))
+instances = obj.get("instances") or []
+print("INSTANCE\tPROJECT_ID\tREPO\tLAST_ACCESS\tCODEX_SESSION\tPRESENT\tPATH")
+for item in instances:
+    instance = str(item.get("instance") or "-")
+    projects = item.get("projects") or []
+    if not projects:
+        continue
+    for p in projects:
+        print(
+            "\t".join(
+                [
+                    instance,
+                    str(p.get("project_id") or "-"),
+                    str(p.get("repo_name") or "-"),
+                    str(p.get("last_access") or "-"),
+                    str(p.get("codex_session") or "-"),
+                    str(p.get("present") or "-"),
+                    str(p.get("path") or "-"),
+                ]
+            )
+        )
+PY
+}
+
+project_network_registry_print_json() {
+  [ -f "$DOCKERMT_PROJECTS_NETWORK_FILE" ] || project_network_registry_refresh >/dev/null
+  cat "$DOCKERMT_PROJECTS_NETWORK_FILE"
+}
+
+project_network_resolve_repo_root() {
+  local target_container="${1:-}"
+  local ref="${2:-}"
+  [ -n "$target_container" ] || return 1
+  docker exec -i "$target_container" python3 - "$ref" <<'PY'
+import glob
+import json
+import os
+import sys
+
+ref = (sys.argv[1] or "").strip()
+projects_root = "/config/.dockermt/projects"
+instance_meta = "/config/.dockermt/project/project.json"
+
+default_ref = ""
+if not ref and os.path.exists(instance_meta):
+    try:
+        data = json.load(open(instance_meta, "r", encoding="utf-8"))
+        default_ref = str(data.get("last_project_id") or "").strip()
+    except Exception:
+        default_ref = ""
+if not ref:
+    ref = default_ref
+
+rows = []
+for path in glob.glob(os.path.join(projects_root, "*", "project.json")):
+    try:
+        data = json.load(open(path, "r", encoding="utf-8"))
+    except Exception:
+        continue
+    if not isinstance(data, dict):
+        continue
+    row = {
+        "project_id": str(data.get("project_id") or ""),
+        "slug": str(data.get("slug") or ""),
+        "repo_name": str(data.get("repo_name") or ""),
+        "repo_rel": str(data.get("repo_rel") or ""),
+        "repo_root": str(data.get("repo_root") or ""),
+    }
+    rows.append(row)
+
+def match(row, value):
+    if not value:
+        return False
+    v = value.strip().lower()
+    if not v:
+        return False
+    options = {
+        row["project_id"].lower(),
+        row["slug"].lower(),
+        row["repo_name"].lower(),
+        row["repo_rel"].lower(),
+        row["repo_root"].lower(),
+        os.path.basename(row["repo_root"]).lower(),
+    }
+    return v in options
+
+if ref:
+    for row in rows:
+        if match(row, ref):
+            if row["repo_root"]:
+                print(row["repo_root"])
+                raise SystemExit(0)
+    raise SystemExit(1)
+
+if rows:
+    last = rows[0]
+    if last["repo_root"]:
+        print(last["repo_root"])
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+project_network_resume() {
+  require_docker
+  local target_key="${1:-}"
+  local project_ref="${2:-}"
+  [ -n "$target_key" ] || {
+    echo "ERR: uso: dockermt project resume <instancia> [projeto]" >&2
+    return 1
+  }
+  local target_container repo_root
+  target_container="$(normalize_runtime_target "$target_key")"
+  container_exists "$target_container" || {
+    echo "ERR: instancia nao localizada: $target_key" >&2
+    return 1
+  }
+  runtime_ensure_running "$target_container" || {
+    echo "ERR: nao foi possivel iniciar a instancia: $target_key" >&2
+    return 1
+  }
+  repo_root="$(project_network_resolve_repo_root "$target_container" "$project_ref" 2>/dev/null || true)"
+  [ -n "$repo_root" ] || {
+    echo "ERR: projeto nao localizado na instancia '$target_key'." >&2
+    return 1
+  }
+  local -a exec_flags=(-i)
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec_flags=(-it)
+  fi
+  docker exec \
+    "${exec_flags[@]}" \
+    -e "DOCKERMT_RESUME_REPO_ROOT=$repo_root" \
+    "$target_container" /bin/bash -lc '
+      cd "$DOCKERMT_RESUME_REPO_ROOT" 2>/dev/null || {
+        echo "ERR: projeto nao encontrado em $DOCKERMT_RESUME_REPO_ROOT" >&2
+        exit 1
+      }
+      exec bash -i
+    '
+}
+
+project_meta_forward_to_central_if_needed() {
+  local sub="${1:-}"
+  shift || true
+  local current_name central_name
+  case "$sub" in
+    network|net|all|registry|resume|network-sync|sync-network|network-json|json-network)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  current_name="$(resolve_current_runtime_container)"
+  runtime_is_instance "$current_name" || return 1
+  [ "${ROUTED_EXPLICIT_TARGET:-0}" != "1" ] || return 1
+  central_name="$(resolve_central_runtime_container)"
+  [ -n "$central_name" ] || return 1
+  [ "$central_name" != "$current_name" ] || return 1
+  docker_exec_runtime_cli "$central_name" project "$sub" "$@"
+  return 0
+}
+
+project_meta_cli() {
+  local sub="${1:-}"
+  shift || true
+  if [ ! -x /usr/local/bin/dockermt-project-meta ]; then
+    echo "ERR: metadata de projeto nao instalada neste runtime." >&2
+    return 1
+  fi
+  if project_meta_forward_to_central_if_needed "$sub" "$@"; then
+    return 0
+  fi
+  case "$sub" in
+    ""|list)
+      DOCKERMT_INSTANCE_NAME="${DOCKERMT_INSTANCE_NAME:-$(normalize_runtime_target)}" \
+        /usr/local/bin/dockermt-project-meta list-projects
+      ;;
+    log)
+      [ "$#" -gt 0 ] || { echo "ERR: uso: dockermt project log <projeto>" >&2; return 1; }
+      DOCKERMT_INSTANCE_NAME="${DOCKERMT_INSTANCE_NAME:-$(normalize_runtime_target)}" \
+        /usr/local/bin/dockermt-project-meta log-project "$1"
+      ;;
+    json)
+      [ "$#" -gt 0 ] || { echo "ERR: uso: dockermt project json <projeto>" >&2; return 1; }
+      DOCKERMT_INSTANCE_NAME="${DOCKERMT_INSTANCE_NAME:-$(normalize_runtime_target)}" \
+        /usr/local/bin/dockermt-project-meta json-project "$1"
+      ;;
+    resume)
+      project_network_resume "$@"
+      ;;
+    network-sync|sync-network)
+      project_network_registry_refresh
+      ;;
+    network-json|json-network)
+      project_network_registry_refresh >/dev/null
+      project_network_registry_print_json
+      ;;
+    network|net|all|registry)
+      case "${1:-projects}" in
+        ""|projects|list)
+          project_network_registry_refresh >/dev/null
+          project_network_registry_print_projects
+          ;;
+        instances|status)
+          project_network_registry_refresh >/dev/null
+          project_network_registry_print_instances
+          ;;
+        json)
+          project_network_registry_refresh >/dev/null
+          project_network_registry_print_json
+          ;;
+        sync)
+          project_network_registry_refresh
+          ;;
+        resume)
+          shift || true
+          project_network_resume "$@"
+          ;;
+        *)
+          echo "ERR: uso: dockermt project network [projects|instances|json|sync|resume INSTANCIA [PROJETO]]" >&2
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      DOCKERMT_INSTANCE_NAME="${DOCKERMT_INSTANCE_NAME:-$(normalize_runtime_target)}" \
+        /usr/local/bin/dockermt-project-meta show-project "$sub"
+      ;;
+  esac
+}
+
+record_project_import_batch() {
+  local target_container="${1:-}"
+  local category="${2:-}"
+  shift 2 || true
+  [ -n "$target_container" ] || return 1
+  [ -n "$category" ] || return 1
+  [ "$#" -gt 0 ] || return 0
+  docker exec "$target_container" /usr/local/bin/dockermt-project-meta import "$category" "$@" >/dev/null 2>&1 || true
+}
+
+project_summary_from_container() {
+  local target_container="${1:-}"
+  local target_volume="" target_image="" summary_json=""
+  [ -n "$target_container" ] || return 0
+  target_volume="$(current_container_config_volume "$target_container")"
+  target_image="$(current_container_image "$target_container")"
+  if [ -n "$target_volume" ] && [ -n "$target_image" ]; then
+    summary_json="$(docker run --rm --entrypoint sh -v "${target_volume}:/config:ro" "$target_image" -lc '[ -f /config/.dockermt/project/project.json ] && cat /config/.dockermt/project/project.json || true' 2>/dev/null || true)"
+  fi
+  if [ -z "$summary_json" ]; then
+    printf '%s\t%s\t%s\n' "-" "-" "0"
+    return 0
+  fi
+  python3 - "$summary_json" <<'PY'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    print("-\t-\t0")
+    raise SystemExit(0)
+last_accessed = data.get("last_accessed_at") or "-"
+session_id = data.get("last_codex_session_id") or "-"
+projects_count = data.get("projects_count")
+if projects_count is None:
+    git_repos = data.get("git_repositories") or []
+    projects_count = len(git_repos)
+print(f"{last_accessed}\t{session_id}\t{projects_count}")
+PY
+}
+
+sanitize_snapshot_name() {
+  local raw="${1:-snapshot}"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  raw="$(printf '%s' "$raw" | sed 's/[^a-z0-9._-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')"
+  if [ -z "$raw" ]; then
+    raw="snapshot"
+  fi
+  printf '%s\n' "$raw"
+}
+
+build_snapshot_id() {
+  printf '%s.v%s-%s\n' "$1" "$2" "$3"
+}
+
+snapshot_image_ref_from_id() {
+  printf '%s:%s\n' "$SNAPSHOT_REPO" "$1"
+}
+
+snapshot_volume_name_from_id() {
+  printf '%s.%s\n' "$SNAPSHOT_VOLUME_PREFIX" "$1"
+}
+
+resolve_pull_image_ref() {
+  local raw_ref="${1:-}"
+  if [ -z "$raw_ref" ]; then
+    return 1
+  fi
+  case "$raw_ref" in
+    *@sha256:*)
+      printf '%s\n' "$raw_ref"
+      ;;
+    */*:*|*.*:*|*:*/*)
+      printf '%s\n' "$raw_ref"
+      ;;
+    */*)
+      printf '%s\n' "$raw_ref"
+      ;;
+    *:*)
+      printf '%s\n' "${PULL_REPO}/$raw_ref"
+      ;;
+    *)
+      printf '%s:%s\n' "$PULL_REPO" "$raw_ref"
+      ;;
+  esac
+}
+
+latest_snapshot_id() {
+  docker image ls "$SNAPSHOT_REPO" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | while read -r ref; do
+    [ -n "$ref" ] || continue
+    docker image inspect "$ref" --format '{{index .Config.Labels "dockermt.snapshot.timestamp"}}|{{index .Config.Labels "dockermt.snapshot.id"}}' 2>/dev/null || true
+  done | awk -F'|' '$1 != "" && $1 != "<no value>" && $2 != "" && $2 != "<no value>" {print $0}' | sort | tail -n 1 | cut -d'|' -f2
+}
+
+ensure_state_volume() {
+  docker volume inspect "$STATE_VOLUME" >/dev/null 2>&1 || docker volume create "$STATE_VOLUME" >/dev/null
+}
+
+read_selected_snapshot_id() {
+  docker volume inspect "$STATE_VOLUME" >/dev/null 2>&1 || return 0
+  docker run --rm -u 0 -v "${STATE_VOLUME}:/state" alpine sh -lc '
+    f="/state/$1"
+    [ -f "$f" ] || exit 0
+    cat "$f"
+  ' sh "$STATE_SELECTED_FILE" 2>/dev/null | head -n 1
+}
+
+clear_selected_snapshot_id() {
+  docker volume inspect "$STATE_VOLUME" >/dev/null 2>&1 || return 0
+  docker run --rm -u 0 -v "${STATE_VOLUME}:/state" alpine sh -lc '
+    rm -f "/state/$1"
+  ' sh "$STATE_SELECTED_FILE" >/dev/null 2>&1 || true
+}
+
+set_selected_snapshot_id() {
+  local snapshot_id="${1:-}"
+  [ -n "$snapshot_id" ] || return 1
+  ensure_state_volume
+  docker run --rm -u 0 \
+    -e "SNAPSHOT_ID=$snapshot_id" \
+    -e "STATE_SELECTED_FILE=$STATE_SELECTED_FILE" \
+    -v "${STATE_VOLUME}:/state" alpine sh -lc '
+      mkdir -p /state
+      printf "%s\n" "$SNAPSHOT_ID" > "/state/$STATE_SELECTED_FILE"
+    ' >/dev/null
+}
+
+selected_snapshot_id() {
+  local snapshot_id snapshot_image snapshot_volume
+  snapshot_id="$(read_selected_snapshot_id)"
+  [ -n "$snapshot_id" ] || return 0
+  snapshot_image="$(snapshot_image_ref_from_id "$snapshot_id")"
+  snapshot_volume="$(snapshot_volume_name_from_id "$snapshot_id")"
+  if docker image inspect "$snapshot_image" >/dev/null 2>&1 && docker volume inspect "$snapshot_volume" >/dev/null 2>&1; then
+    printf '%s\n' "$snapshot_id"
+    return 0
+  fi
+  clear_selected_snapshot_id
+}
+
+current_container_image() {
+  local container_name
+  container_name="$(normalize_runtime_target "${1:-}")"
+  docker inspect "$container_name" --format '{{.Config.Image}}' 2>/dev/null || true
+}
+
+preferred_runtime_image() {
+  local candidate="dockermt:${DOCKERMT_VERSION_CURRENT}"
+  if docker image inspect "$candidate" >/dev/null 2>&1; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  current_container_image "${1:-}"
+}
+
+current_container_config_volume() {
+  local container_name
+  container_name="$(normalize_runtime_target "${1:-}")"
+  docker inspect "$container_name" --format '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Name}}{{end}}{{end}}' 2>/dev/null || true
+}
+
+current_container_status() {
+  local container_name
+  container_name="$(normalize_runtime_target "${1:-}")"
+  if [ "$container_name" = "$(resolve_current_runtime_container)" ]; then
+    printf 'running\n'
+    return 0
+  fi
+  docker inspect "$container_name" --format '{{.State.Status}}' 2>/dev/null || true
+}
+
+runtime_web_url() {
+  local container_name
+  local host_port
+  container_name="$(normalize_runtime_target "${1:-}")"
+  host_port="$(container_host_port "$container_name" "3000" "${MT5_WEB_PORT:-3000}")"
+  printf 'http://localhost:%s\n' "$host_port"
+}
+
+runtime_internal_open_url() {
+  printf 'http://127.0.0.1:6900\n'
+}
+
+runtime_external_display() {
+  if [ -n "${DOCKERMT_APP_DISPLAY:-}" ]; then
+    printf '%s\n' "$DOCKERMT_APP_DISPLAY"
+    return 0
+  fi
+  if [ -n "${DISPLAY:-}" ]; then
+    case "$DISPLAY" in
+      :*|localhost:*|127.0.0.1:*)
+        ;;
+      *)
+        printf '%s\n' "$DISPLAY"
+        return 0
+        ;;
+    esac
+  fi
+  return 1
+}
+
+runtime_mt5_path() {
+  printf '/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe\n'
+}
+
+runtime_prepare_user_runtime_dir() {
+  local runtime_dir="${XDG_RUNTIME_DIR:-/tmp/runtime-abc}"
+  mkdir -p "$runtime_dir" >/dev/null 2>&1 || true
+  if [ "$(id -u)" = "0" ]; then
+    chown abc:abc "$runtime_dir" >/dev/null 2>&1 || true
+  fi
+  chmod 700 "$runtime_dir" >/dev/null 2>&1 || true
+  printf '%s\n' "$runtime_dir"
+}
+
+runtime_run_as_mt5_user() {
+  local cmd="${1:-}"
+  local runtime_dir="${2:-}"
+  [ -n "$cmd" ] || return 1
+  [ -n "$runtime_dir" ] || runtime_dir="$(runtime_prepare_user_runtime_dir)"
+  if [ "$(id -u)" = "0" ]; then
+    su -s /bin/sh abc -c "XDG_RUNTIME_DIR='$runtime_dir' $cmd"
+  else
+    XDG_RUNTIME_DIR="$runtime_dir" sh -lc "$cmd"
+  fi
+}
+
+runtime_mt5linux_start() {
+  local target_display="${1:-}"
+  local runtime_dir=""
+  [ -n "$target_display" ] || return 1
+  local out_log err_log
+  out_log="/config/dockermt/runtime/mt5linux-open.out"
+  err_log="/config/dockermt/runtime/mt5linux-open.err"
+  mkdir -p /config/dockermt/runtime
+  chown -R abc:abc /config/dockermt/runtime
+  runtime_dir="$(runtime_prepare_user_runtime_dir)"
+  runtime_run_as_mt5_user "DISPLAY='$target_display' WINEPREFIX='/config/.wine' nohup wine python -m mt5linux --host 0.0.0.0 -p '${MT5_PY_PORT:-8001}' >'$out_log' 2>'$err_log' &" "$runtime_dir" >/dev/null 2>&1
+}
+
+runtime_mt5_window_title() {
+  local instance_name
+  instance_name="${DOCKERMT_INSTANCE_NAME:-${HOSTNAME:-dockermt}}"
+  printf 'DockerMT [%s] MT5\n' "$instance_name"
+}
+
+runtime_mt5_window_id() {
+  local target_display="${1:-}"
+  local runtime_dir="" listing
+  [ -n "$target_display" ] || return 1
+  runtime_dir="$(runtime_prepare_user_runtime_dir)"
+  listing="$(runtime_run_as_mt5_user "DISPLAY='$target_display' wmctrl -lx" "$runtime_dir" 2>/dev/null || true)"
+  printf '%s\n' "$listing" | awk '$3 ~ /terminal64\.exe\.terminal64\.exe/ { print $1; exit }'
+}
+
+runtime_rename_mt5_window() {
+  local target_display="${1:-}"
+  local runtime_dir=""
+  [ -n "$target_display" ] || return 1
+  local window_id title
+  window_id="$(runtime_mt5_window_id "$target_display")"
+  [ -n "$window_id" ] || return 1
+  title="$(runtime_mt5_window_title)"
+  runtime_dir="$(runtime_prepare_user_runtime_dir)"
+  runtime_run_as_mt5_user "DISPLAY='$target_display' wmctrl -ir '$window_id' -T '$title'" "$runtime_dir" >/dev/null 2>&1 || return 1
+}
+
+runtime_wait_and_rename_mt5_window() {
+  local target_display="${1:-}"
+  local tries="${2:-12}"
+  [ -n "$target_display" ] || return 1
+  while [ "$tries" -gt 0 ]; do
+    if runtime_rename_mt5_window "$target_display"; then
+      return 0
+    fi
+    sleep 1
+    tries=$((tries - 1))
+  done
+  return 1
+}
+
+rename_instance_mt5_window_in_container() {
+  local target_container="${1:-}"
+  local target_display="${2:-:1}"
+  local instance_name="${3:-}"
+  local tries=30
+  local win=""
+  [ -n "$target_container" ] || return 1
+  [ -n "$instance_name" ] || return 1
+  while [ "$tries" -gt 0 ]; do
+    win="$(docker exec "$target_container" sh -lc "su -s /bin/sh abc -c 'DISPLAY=${target_display} wmctrl -lx'" 2>/dev/null | awk '$3 ~ /terminal64\.exe\.terminal64\.exe/ { print $1; exit }' || true)"
+    if [ -n "$win" ]; then
+      docker exec "$target_container" sh -lc "su -s /bin/sh abc -c \"DISPLAY=${target_display} wmctrl -ir $win -T 'DockerMT [${instance_name}] MT5'\"" >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 1
+    tries=$((tries - 1))
+  done
+  return 1
+}
+
+runtime_open_mt5_on_display() {
+  local target_display="${1:-}"
+  local launch_err window_id log_reason runtime_dir
+  RUNTIME_MT5_OPEN_REASON=""
+  [ -n "$target_display" ] || return 1
+  local mt5file out_log err_log
+  mt5file="$(runtime_mt5_path)"
+  if [ ! -f "$mt5file" ]; then
+    RUNTIME_MT5_OPEN_REASON="terminal64.exe nao encontrado em $mt5file"
+    return 1
+  fi
+  if ! command -v wine >/dev/null 2>&1; then
+    RUNTIME_MT5_OPEN_REASON="wine nao encontrado no runtime"
+    return 1
+  fi
+  out_log="/config/dockermt/runtime/mt5-open.out"
+  err_log="/config/dockermt/runtime/mt5-open.err"
+  mkdir -p /config/dockermt/runtime
+  chown -R abc:abc /config/dockermt/runtime
+  runtime_dir="$(runtime_prepare_user_runtime_dir)"
+  runtime_run_as_mt5_user "WINEPREFIX='/config/.wine' wineserver -k" "$runtime_dir" >/dev/null 2>&1 || true
+  sleep 3
+  launch_err="$(runtime_run_as_mt5_user "DISPLAY='$target_display' WINEPREFIX='/config/.wine' WINEDEBUG='-all' nohup wine '$mt5file' >'$out_log' 2>'$err_log' &" "$runtime_dir" 2>&1 >/dev/null || true)"
+  if [ -n "$launch_err" ]; then
+    launch_err="$(printf '%s' "$launch_err" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
+    RUNTIME_MT5_OPEN_REASON="falha ao iniciar MT5 no display $target_display: $launch_err"
+    return 1
+  fi
+  sleep 6
+  window_id="$(runtime_mt5_window_id "$target_display" || true)"
+  if [ -z "$window_id" ]; then
+    log_reason="$(sed -n '1p' "$err_log" 2>/dev/null | tr -d '\r' || true)"
+    if [ -n "$log_reason" ]; then
+      RUNTIME_MT5_OPEN_REASON="$log_reason"
+    else
+      RUNTIME_MT5_OPEN_REASON="janela do MT5 nao apareceu no display $target_display"
+    fi
+    return 1
+  fi
+  runtime_wait_and_rename_mt5_window "$target_display" 12 >/dev/null 2>&1 || true
+  runtime_mt5linux_start "$target_display"
+  return 0
+}
+
+print_runtime_status() {
+  require_docker
+  _print_cli_banner
+  local runtime_name status image url volume
+  runtime_name="$(normalize_runtime_target "${1:-}")"
+  status="$(current_container_status "$runtime_name")"
+  image="$(current_container_image "$runtime_name")"
+  volume="$(current_container_config_volume "$runtime_name")"
+  url="$(runtime_web_url "$runtime_name")"
+  printf 'container: %s (%s)
+' "$runtime_name" "${status:-unknown}"
+  [ -n "$image" ] && printf 'image: %s
+' "$image"
+  [ -n "$volume" ] && printf 'config-volume: %s
+' "$volume"
+  printf 'url: %s
+' "$url"
+}
+
+print_runtime_map() {
+  require_docker
+  _print_cli_banner
+  local runtime_name volume image status url web_port py_port telnet_port
+  runtime_name="$(normalize_runtime_target "${1:-}")"
+  volume="$(current_container_config_volume "$runtime_name")"
+  image="$(current_container_image "$runtime_name")"
+  status="$(current_container_status "$runtime_name")"
+  url="$(runtime_web_url "$runtime_name")"
+  web_port="$(container_host_port "$runtime_name" "3000" "${MT5_WEB_PORT:-3000}")"
+  py_port="$(container_host_port "$runtime_name" "8001" "${MT5_PY_PORT:-8001}")"
+  telnet_port="$(container_host_port "$runtime_name" "1122" "${TELNETMT_PORT:-1122}")"
+  cat <<EOF2
+DOCKERMT Runtime Map
+====================
+Container: ${runtime_name}
+Status: ${status:-unknown}
+Image: ${image:-}
+Config volume: ${volume:-}
+URL: ${url}
+
+Ports
+-----
+- Web (KasmVNC): host ${web_port} -> container 3000
+- Python bridge: host ${py_port} -> container 8001
+- TelnetMT socket: host ${telnet_port} -> container 1122
+
+Important paths
+---------------
+- /config
+- /config/.wine/drive_c/Program Files/MetaTrader 5
+- /config/.wine/drive_c/Program Files/MetaTrader 5/MQL5
+- /config/.wine/drive_c/Program Files/MetaTrader 5/Config/services.ini
+- /usr/local/bin/dockermt
+EOF2
+}
+
+runtime_up() {
+  require_docker
+  local runtime_name status
+  runtime_name="$(normalize_runtime_target "${1:-}")"
+  status="$(current_container_status "$runtime_name")"
+  if [ -z "$status" ]; then
+    echo "ERR: runtime nao localizado: $runtime_name" >&2
+    return 1
+  fi
+  if [ "$status" != "running" ]; then
+    docker start "$runtime_name" >/dev/null
+  fi
+  print_runtime_status "$runtime_name"
+}
+
+runtime_open() {
+  _print_cli_banner
+  local requested_target=""
+  local want_no_open=0
+  local explicit_url=""
+  local launch_display=""
+  local x410_reason=""
+  local forwarded=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --target)
+        shift || true
+        requested_target="${1:-}"
+        ;;
+      --target=*)
+        requested_target="${1#--target=}"
+        ;;
+      --no-open)
+        want_no_open=1
+        forwarded+=("--no-open")
+        ;;
+      --url)
+        shift || true
+        explicit_url="${1:-}"
+        forwarded+=("--url" "${explicit_url}")
+        ;;
+      --url=*)
+        explicit_url="${1#--url=}"
+        forwarded+=("--url=${explicit_url}")
+        ;;
+      --app|--build|--start)
+        ;;
+      *)
+        if [ -z "$requested_target" ]; then
+          requested_target="$1"
+        else
+          echo "ERR: argumento inesperado em 'dockermt container open': $1" >&2
+          return 1
+        fi
+        ;;
+    esac
+    shift || true
+  done
+  local runtime_name current_name
+  runtime_name="$(normalize_runtime_target "$requested_target")"
+  current_name="$(resolve_current_runtime_container)"
+  if [ "${ROUTED_EXPLICIT_TARGET:-0}" != "1" ] && runtime_is_instance "$current_name"; then
+    local short_current
+    short_current="$(runtime_short_name "$current_name")"
+    echo "ERR: 'dockermt container open' dentro da instancia exige alvo explicito com @." >&2
+    echo "Use: dockermt @${short_current} container open" >&2
+    return 1
+  fi
+  if [ "$runtime_name" != "$current_name" ]; then
+    if ! container_exists "$runtime_name"; then
+      echo "ERR: runtime nao localizado: $runtime_name" >&2
+      return 1
+    fi
+    docker exec "$runtime_name" /usr/local/bin/dockermt container open "${forwarded[@]}"
+    return $?
+  fi
+  local url
+  url="${explicit_url:-$(runtime_web_url "$runtime_name")}"
+  printf 'container: ativo
+'
+  printf 'url: %s
+' "$url"
+  if [ "$want_no_open" = "1" ]; then
+    return 0
+  fi
+  if ! launch_display="$(runtime_external_display 2>/dev/null)"; then
+    x410_reason="DOCKERMT_APP_DISPLAY ausente no host"
+    printf 'mt5: falha no X410.
+'
+    printf 'mt5-display: nao informado
+'
+    printf 'mt5-defeito: %s
+' "$x410_reason"
+    printf 'mt5-hint: este runtime nao usa fallback de browser.
+'
+    return 1
+  fi
+  if runtime_open_mt5_on_display "$launch_display"; then
+    printf 'mt5: aberto no display externo.
+'
+    printf 'mt5-display: %s
+' "$launch_display"
+    return 0
+  fi
+  x410_reason="${RUNTIME_MT5_OPEN_REASON:-falha ao abrir MT5 no display externo}"
+  printf 'mt5: falha no X410.
+'
+  printf 'mt5-display: %s
+' "$launch_display"
+  printf 'mt5-defeito: %s
+' "$x410_reason"
+  printf 'mt5-hint: este runtime nao usa fallback de browser.
+'
+  return 1
+}
+
+instance_container_name_from_slug() {
+  printf 'dockermt-%s\n' "$1"
+}
+
+instance_volume_name_from_slug() {
+  printf 'dockermt.instance.%s\n' "$1"
+}
+
+instance_state_volume_from_slug() {
+  printf 'dockermt_state.%s\n' "$1"
+}
+
+port_is_free() {
+  local host_port="${1:-}"
+  [ -n "$host_port" ] || return 1
+  if docker ps --format '{{.Ports}}' | grep -Eq "(^|[, ])(0\\.0\\.0\\.0|\\[::\\]):${host_port}->"; then
+    return 1
+  fi
+  return 0
+}
+
+allocate_instance_ports() {
+  local offset=1
+  while [ "$offset" -le 200 ]; do
+    local telnet_port web_port py_port
+    telnet_port="$((1122 + offset))"
+    web_port="$((3000 + offset))"
+    py_port="$((8001 + offset))"
+    if port_is_free "$telnet_port" && port_is_free "$web_port" && port_is_free "$py_port"; then
+      printf '%s|%s|%s\n' "$telnet_port" "$web_port" "$py_port"
+      return 0
+    fi
+    offset="$((offset + 1))"
+  done
+  return 1
+}
+
+clone_volume_contents() {
+  local source_volume="${1:-}"
+  local target_volume="${2:-}"
+  [ -n "$source_volume" ] || return 1
+  [ -n "$target_volume" ] || return 1
+  docker run --rm -v "${source_volume}:/from:ro" -v "${target_volume}:/to" alpine sh -lc \
+    'cd /from && tar cf - . | (cd /to && tar xf -)'
+}
+
+replace_volume_contents() {
+  local source_volume="${1:-}"
+  local target_volume="${2:-}"
+  [ -n "$source_volume" ] || return 1
+  [ -n "$target_volume" ] || return 1
+  docker volume inspect "$target_volume" >/dev/null 2>&1 || docker volume create "$target_volume" >/dev/null
+  docker run --rm -v "${source_volume}:/from:ro" -v "${target_volume}:/to" alpine sh -lc \
+    'find /to -mindepth 1 -maxdepth 1 -exec rm -rf {} +;
+     cd /from &&
+     tar \
+       --exclude=./.XDG \
+       --exclude=./.dockermt/codex \
+       --exclude=./.dockermt/docs \
+       --exclude=./.dockermt/extensions \
+       -cf - . | (cd /to && tar xf -)'
+}
+
+random_instance_theme_pair() {
+  local -a themes=(
+    "blue:white"
+    "cyan:black"
+    "green:black"
+    "magenta:white"
+    "red:white"
+    "yellow:black"
+    "gray:black"
+  )
+  local raw idx
+  raw="$(od -An -N2 -tu2 /dev/urandom 2>/dev/null | tr -d ' ' || true)"
+  if ! printf '%s' "$raw" | grep -Eq '^[0-9]+$'; then
+    raw="$(date +%s)"
+  fi
+  idx=$((raw % ${#themes[@]}))
+  printf '%s\n' "${themes[$idx]}"
+}
+
+auto_instance_banner_color() {
+  local pair
+  pair="$(random_instance_theme_pair)"
+  printf '%s\n' "${pair%%:*}"
+}
+
+auto_instance_banner_text_color() {
+  local banner_color="${1:-}"
+  case "$banner_color" in
+    blue|magenta|red)
+      printf 'white\n'
+      ;;
+    yellow|cyan|green|gray|grey)
+      printf 'black\n'
+      ;;
+    *)
+      local pair
+      pair="$(random_instance_theme_pair)"
+      printf '%s\n' "${pair##*:}"
+      ;;
+  esac
+}
+
+valid_instance_banner_color() {
+  case "${1:-}" in
+    yellow|blue|cyan|green|magenta|red|gray|grey)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+valid_instance_banner_text_color() {
+  case "${1:-}" in
+    black|red|green|yellow|blue|magenta|cyan|gray|grey|white|bright-white|gold|amber)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+assign_instance_banner_theme() {
+  local target_volume="${1:-}"
+  local instance_slug="${2:-}"
+  local runtime_image="${3:-}"
+  local preferred_color="${4:-}"
+  local preferred_text="${5:-}"
+  [ -n "$target_volume" ] || return 1
+  [ -n "$instance_slug" ] || return 1
+  [ -n "$runtime_image" ] || return 1
+  local banner_color banner_text_color pair
+  if [ -n "$preferred_color" ]; then
+    valid_instance_banner_color "$preferred_color" || {
+      echo "ERR: cor de banner invalida: $preferred_color" >&2
+      return 1
+    }
+    banner_color="$preferred_color"
+  else
+    pair="$(random_instance_theme_pair)"
+    banner_color="${pair%%:*}"
+  fi
+  if [ -n "$preferred_text" ]; then
+    valid_instance_banner_text_color "$preferred_text" || {
+      echo "ERR: cor de texto invalida: $preferred_text" >&2
+      return 1
+    }
+    banner_text_color="$preferred_text"
+  else
+    if [ -n "${pair:-}" ]; then
+      banner_text_color="${pair##*:}"
+    else
+      banner_text_color="$(auto_instance_banner_text_color "$banner_color")"
+    fi
+  fi
+  docker run --rm \
+    -i \
+    --entrypoint python3 \
+    -v "${target_volume}:/config" \
+    "$runtime_image" \
+    - "$banner_color" "$banner_text_color" <<'PY'
+import json, pathlib, sys
+cfg_path = pathlib.Path("/config/.dockermt/config.json")
+cfg_path.parent.mkdir(parents=True, exist_ok=True)
+color = sys.argv[1].strip()
+text = sys.argv[2].strip()
+try:
+    cfg = json.loads(cfg_path.read_text("utf-8")) if cfg_path.exists() else {}
+except Exception:
+    cfg = {}
+ui = cfg.get("ui") if isinstance(cfg.get("ui"), dict) else {}
+ui["bannerColor"] = color
+ui["bannerTextColor"] = text
+ui["commandColor"] = color
+cfg["ui"] = ui
+cfg_path.write_text(json.dumps(cfg, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+reset_target_workspace_from_zero() {
+  local target_volume="${1:-}"
+  [ -n "$target_volume" ] || return 1
+  ensure_factory_workspace_volume
+  if ! factory_has_runtime_install >/dev/null 2>&1; then
+    refresh_factory_workspace_from_runtime >/dev/null 2>&1 || true
+  fi
+  docker run --rm \
+    -e "MT5_ROOT_REL=${DOCKERMT_MT5_ROOT_REL}" \
+    -e "MQL5_ROOT_REL=${DOCKERMT_MQL5_ROOT_REL}" \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -v "${DOCKERMT_WORKSPACE_FACTORY_VOLUME}:/factory:ro" \
+    -v "${target_volume}:/config" \
+    alpine sh -lc '
+      set -eu
+      if [ -d /factory/MT5ROOT ]; then
+        target_mt5="/config/${MT5_ROOT_REL}"
+        mkdir -p "$target_mt5"
+        find "$target_mt5" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+        cd /factory/MT5ROOT && tar cf - . | (cd "$target_mt5" && tar xf -)
+        chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "$target_mt5" 2>/dev/null || true
+        if [ -d /config/.wine ]; then
+          chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /config/.wine 2>/dev/null || true
+        fi
+      else
+        target_mql5="/config/${MQL5_ROOT_REL}"
+        mkdir -p "$target_mql5"
+        find "$target_mql5" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+        cd /factory/MQL5 && tar cf - . | (cd "$target_mql5" && tar xf -)
+        chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "$target_mql5"
+        if [ -d /config/.wine ]; then
+          chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /config/.wine 2>/dev/null || true
+        fi
+      fi
+    '
+}
+
+copy_single_mql5_item_into_volume() {
+  local source_volume="${1:-}"
+  local target_volume="${2:-}"
+  local category="${3:-}"
+  local raw_item="${4:-}"
+  [ -n "$source_volume" ] || return 1
+  [ -n "$target_volume" ] || return 1
+  [ -n "$category" ] || return 1
+  [ -n "$raw_item" ] || return 0
+  docker run --rm \
+    -e "ITEM_RAW=${raw_item}" \
+    -e "CATEGORY=${category}" \
+    -e "MQL5_ROOT_REL=${DOCKERMT_MQL5_ROOT_REL}" \
+    -e "RUNTIME_UID=${DOCKERMT_RUNTIME_UID}" \
+    -e "RUNTIME_GID=${DOCKERMT_RUNTIME_GID}" \
+    -v "${source_volume}:/from:ro" \
+    -v "${target_volume}:/to" \
+    alpine sh -lc '
+set -eu
+rel="$(printf "%s" "${ITEM_RAW}" | tr "\\" "/")"
+while [ "${rel#/}" != "$rel" ]; do
+  rel="${rel#/}"
+done
+while [ "${rel%/}" != "$rel" ]; do
+  rel="${rel%/}"
+done
+[ -n "$rel" ] || exit 0
+src_root="/from/${MQL5_ROOT_REL}/${CATEGORY}"
+dst_root="/to/${MQL5_ROOT_REL}/${CATEGORY}"
+mkdir -p "$dst_root"
+src="${src_root}/${rel}"
+if [ ! -e "$src" ]; then
+  rel_base="$(basename "$rel")"
+  rel_noext="${rel%.mq5}"
+  rel_noext="${rel_noext%.ex5}"
+  if [ -e "${src_root}/${rel}.mq5" ]; then
+    rel="${rel}.mq5"
+    src="${src_root}/${rel}"
+  elif [ -e "${src_root}/${rel}.ex5" ]; then
+    rel="${rel}.ex5"
+    src="${src_root}/${rel}"
+  elif [ -e "${src_root}/${rel_noext}.mq5" ]; then
+    rel="${rel_noext}.mq5"
+    src="${src_root}/${rel}"
+  elif [ -e "${src_root}/${rel_noext}.ex5" ]; then
+    rel="${rel_noext}.ex5"
+    src="${src_root}/${rel}"
+  else
+    found="$(find "$src_root" -mindepth 1 -maxdepth 6 \
+      \( -type d -o -type f \) \
+      \( -name "$rel_base" -o -name "${rel_base}.mq5" -o -name "${rel_base}.ex5" \) \
+      | sort | head -n 1 || true)"
+    if [ -n "$found" ]; then
+      rel="${found#${src_root}/}"
+      src="$found"
+    fi
+  fi
+fi
+if [ ! -e "$src" ]; then
+  printf "ERR: %s nao localizado na base atual: %s\n" "$CATEGORY" "$ITEM_RAW" >&2
+  exit 1
+fi
+mkdir -p "$dst_root/$(dirname "$rel")"
+cp -a "$src" "$dst_root/$(dirname "$rel")/"
+chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "$dst_root"
+'
+}
+
+copy_selected_mql5_items_into_volume() {
+  local source_volume="${1:-}"
+  local target_volume="${2:-}"
+  local category="${3:-}"
+  shift 3 || true
+  [ "$#" -gt 0 ] || return 0
+  local raw_item
+  for raw_item in "$@"; do
+    [ -n "$raw_item" ] || continue
+    copy_single_mql5_item_into_volume "$source_volume" "$target_volume" "$category" "$raw_item"
+  done
+}
+
+ensure_instance_volume() {
+  local source_volume="${1:-}"
+  local target_volume="${2:-}"
+  [ -n "$source_volume" ] || return 1
+  [ -n "$target_volume" ] || return 1
+  if docker volume inspect "$target_volume" >/dev/null 2>&1; then
+    return 0
+  fi
+  docker volume create "$target_volume" >/dev/null
+  clone_volume_contents "$source_volume" "$target_volume"
+}
+
+volume_has_runtime_layout() {
+  local target_volume="${1:-}"
+  [ -n "$target_volume" ] || return 1
+  docker volume inspect "$target_volume" >/dev/null 2>&1 || return 1
+  docker run --rm \
+    -e "MT5_ROOT_REL=${DOCKERMT_MT5_ROOT_REL}" \
+    -e "MQL5_ROOT_REL=${DOCKERMT_MQL5_ROOT_REL}" \
+    -v "${target_volume}:/config" \
+    alpine sh -lc '
+      set -eu
+      [ -d "/config/${MT5_ROOT_REL}" ]
+      [ -d "/config/${MQL5_ROOT_REL}" ]
+    '
+}
+
+print_runtime_instances() {
+  require_docker
+  _print_cli_banner
+  local rows found
+  rows=""
+  found=0
+  while IFS= read -r runtime_name; do
+    [ -n "$runtime_name" ] || continue
+    local status image volume web_port telnet_port py_port last_accessed codex_session git_repos
+    status="$(current_container_status "$runtime_name")"
+    image="$(current_container_image "$runtime_name")"
+    volume="$(current_container_config_volume "$runtime_name")"
+    web_port="$(container_host_port "$runtime_name" "3000" "-")"
+    telnet_port="$(container_host_port "$runtime_name" "1122" "-")"
+    py_port="$(container_host_port "$runtime_name" "8001" "-")"
+    IFS=$'\t' read -r last_accessed codex_session projects_count <<EOF3
+$(project_summary_from_container "$runtime_name")
+EOF3
+    rows="${rows}$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$runtime_name" "${status:-unknown}" "$web_port" "$telnet_port" "$py_port" "${volume:--}" "${last_accessed:--}" "${codex_session:--}" "${projects_count:-0}")"$'\n'
+    found=1
+  done <<EOF2
+$(docker ps -a --format '{{.Names}}' | grep '^dockermt' | sort || true)
+EOF2
+
+  if [ "$found" -eq 0 ]; then
+    echo "[dockermt] nenhuma instancia dockermt encontrada."
+    return 0
+  fi
+
+  {
+    printf 'NAME\tSTATUS\tWEB\tTELNET\tPYTHON\tCONFIG_VOLUME\tLAST_ACCESS\tCODEX_SESSION\tPROJECTS\n'
+    printf '%s' "$rows"
+  } | if command -v column >/dev/null 2>&1; then
+        column -ts "$(printf '\t')"
+      else
+        cat
+      fi
+}
+
+runtime_spawn() {
+  require_docker
+  _print_cli_banner
+  local _spawn_step=0
+  spawn_step() {
+    _spawn_step=$((_spawn_step + 1))
+    printf '[dockermt] instance-create[%s] %s\n' "$_spawn_step" "$1"
+  }
+  local raw_name=""
+  local explicit_volume=""
+  local explicit_snapshot=""
+  local selected_banner_color=""
+  local selected_banner_text_color=""
+  local selected_runtime_user=""
+  local selected_runtime_user_set=0
+  local -a runtime_user_args=()
+  local -a selected_indicators=()
+  local -a selected_experts=()
+  local -a selected_services=()
+  local -a selected_includes=()
+  local -a selected_libraries=()
+  local -a selected_scripts=()
+  local -a selected_files=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --volume)
+        shift || true
+        explicit_volume="${1:-}"
+        ;;
+      --volume=*)
+        explicit_volume="${1#--volume=}"
+        ;;
+      --snapshot)
+        shift || true
+        explicit_snapshot="${1:-}"
+        ;;
+      --snapshot=*)
+        explicit_snapshot="${1#--snapshot=}"
+        ;;
+      --color)
+        shift || true
+        selected_banner_color="${1:-}"
+        ;;
+      --color=*)
+        selected_banner_color="${1#--color=}"
+        ;;
+      --text-color)
+        shift || true
+        selected_banner_text_color="${1:-}"
+        ;;
+      --text-color=*)
+        selected_banner_text_color="${1#--text-color=}"
+        ;;
+      -u|--user)
+        shift || true
+        selected_runtime_user="${1:-}"
+        selected_runtime_user_set=1
+        ;;
+      --user=*)
+        selected_runtime_user="${1#--user=}"
+        selected_runtime_user_set=1
+        ;;
+      --name)
+        shift || true
+        raw_name="${1:-}"
+        ;;
+      --name=*)
+        raw_name="${1#--name=}"
+        ;;
+      --indicator)
+        shift || true
+        selected_indicators+=("${1:-}")
+        ;;
+      --indicator=*)
+        selected_indicators+=("${1#--indicator=}")
+        ;;
+      --expert)
+        shift || true
+        selected_experts+=("${1:-}")
+        ;;
+      --expert=*)
+        selected_experts+=("${1#--expert=}")
+        ;;
+      --service)
+        shift || true
+        selected_services+=("${1:-}")
+        ;;
+      --service=*)
+        selected_services+=("${1#--service=}")
+        ;;
+      --include)
+        shift || true
+        selected_includes+=("${1:-}")
+        ;;
+      --include=*)
+        selected_includes+=("${1#--include=}")
+        ;;
+      --library)
+        shift || true
+        selected_libraries+=("${1:-}")
+        ;;
+      --library=*)
+        selected_libraries+=("${1#--library=}")
+        ;;
+      --script)
+        shift || true
+        selected_scripts+=("${1:-}")
+        ;;
+      --script=*)
+        selected_scripts+=("${1#--script=}")
+        ;;
+      --files)
+        shift || true
+        selected_files+=("${1:-}")
+        ;;
+      --files=*)
+        selected_files+=("${1#--files=}")
+        ;;
+      *)
+        if [ -z "$raw_name" ]; then
+          raw_name="$1"
+        else
+          echo "ERR: argumento inesperado em 'dockermt instance create': $1" >&2
+          return 1
+        fi
+        ;;
+    esac
+    shift || true
+  done
+
+  if [ -z "$raw_name" ]; then
+    echo "ERR: informe pelo menos o nome da instancia." >&2
+    _instance_topic_usage create >&2
+    return 1
+  fi
+  if [ "$selected_runtime_user_set" = "1" ] && [ -z "$selected_runtime_user" ]; then
+    echo "ERR: informe um valor para --user (ex.: 0 ou 1000:1000)." >&2
+    return 1
+  fi
+  if [ -n "$selected_runtime_user" ] && printf '%s' "$selected_runtime_user" | grep -Eq '[[:space:]]'; then
+    echo "ERR: valor invalido em --user: nao use espacos." >&2
+    return 1
+  fi
+  if [ -n "$selected_runtime_user" ]; then
+    runtime_user_args=(--user "$selected_runtime_user")
+  fi
+
+  local safe_name current_name target_container source_image source_volume target_volume target_state_volume
+  local has_requested_imports=0
+  local snapshot_id ports telnet_port web_port py_port runtime_status
+  local created_target_volume=0
+  local import_announced=0
+  local imports_summary=""
+  safe_name="$(sanitize_snapshot_name "$raw_name")"
+  current_name="$(resolve_current_runtime_container)"
+  target_container="$(instance_container_name_from_slug "$safe_name")"
+  target_state_volume="$(instance_state_volume_from_slug "$safe_name")"
+  spawn_step "preparando..."
+
+  source_image="$(preferred_runtime_image "$current_name")"
+  source_volume="$(current_container_config_volume "$current_name")"
+  [ -n "$source_image" ] || { echo "ERR: nao foi possivel localizar a imagem do runtime atual." >&2; return 1; }
+
+  if [ -n "$explicit_snapshot" ]; then
+    spawn_step "carregando snapshot..."
+    snapshot_id="$(resolve_snapshot_id_from_input "$explicit_snapshot" 2>/dev/null || true)"
+    [ -n "$snapshot_id" ] || { echo "ERR: snapshot nao localizado: $explicit_snapshot" >&2; return 1; }
+    source_image="$(snapshot_image_ref_from_id "$snapshot_id")"
+    source_volume="$(snapshot_volume_name_from_id "$snapshot_id")"
+    docker image inspect "$source_image" >/dev/null 2>&1 || { echo "ERR: imagem de snapshot nao localizada: $source_image" >&2; return 1; }
+    docker volume inspect "$source_volume" >/dev/null 2>&1 || { echo "ERR: volume de snapshot nao localizado: $source_volume" >&2; return 1; }
+  fi
+
+  if [ -n "$explicit_volume" ]; then
+    target_volume="$explicit_volume"
+  else
+    target_volume="$(instance_volume_name_from_slug "$safe_name")"
+  fi
+
+  [ "${#selected_indicators[@]}" -eq 0 ] || imports_summary="${imports_summary} indicators=$(printf '%s,' "${selected_indicators[@]}" | sed 's/,$//')"
+  [ "${#selected_experts[@]}" -eq 0 ] || imports_summary="${imports_summary} experts=$(printf '%s,' "${selected_experts[@]}" | sed 's/,$//')"
+  [ "${#selected_services[@]}" -eq 0 ] || imports_summary="${imports_summary} services=$(printf '%s,' "${selected_services[@]}" | sed 's/,$//')"
+  [ "${#selected_includes[@]}" -eq 0 ] || imports_summary="${imports_summary} include=$(printf '%s,' "${selected_includes[@]}" | sed 's/,$//')"
+  [ "${#selected_libraries[@]}" -eq 0 ] || imports_summary="${imports_summary} libraries=$(printf '%s,' "${selected_libraries[@]}" | sed 's/,$//')"
+  [ "${#selected_scripts[@]}" -eq 0 ] || imports_summary="${imports_summary} scripts=$(printf '%s,' "${selected_scripts[@]}" | sed 's/,$//')"
+  [ "${#selected_files[@]}" -eq 0 ] || imports_summary="${imports_summary} files=$(printf '%s,' "${selected_files[@]}" | sed 's/,$//')"
+  imports_summary="${imports_summary# }"
+  if [ "${#selected_indicators[@]}" -ne 0 ] \
+    || [ "${#selected_experts[@]}" -ne 0 ] \
+    || [ "${#selected_services[@]}" -ne 0 ] \
+    || [ "${#selected_includes[@]}" -ne 0 ] \
+    || [ "${#selected_libraries[@]}" -ne 0 ] \
+    || [ "${#selected_scripts[@]}" -ne 0 ] \
+    || [ "${#selected_files[@]}" -ne 0 ]; then
+    has_requested_imports=1
+  fi
+  if [ "$has_requested_imports" = "1" ] && [ -z "$source_volume" ]; then
+    echo "ERR: nao foi possivel localizar o volume /config base para importar os itens solicitados." >&2
+    return 1
+  fi
+  if [ -n "$selected_banner_color" ]; then
+    valid_instance_banner_color "$selected_banner_color" || {
+      echo "ERR: cor de instancia invalida: $selected_banner_color" >&2
+      echo "Use: blue, cyan, green, magenta, red, yellow ou gray." >&2
+      return 1
+    }
+  fi
+  if [ -n "$selected_banner_text_color" ]; then
+    valid_instance_banner_text_color "$selected_banner_text_color" || {
+      echo "ERR: cor de texto invalida: $selected_banner_text_color" >&2
+      echo "Use: black, white, yellow, cyan, blue, magenta, red, green, gray, gold ou amber." >&2
+      return 1
+    }
+  fi
+
+  if ! docker volume inspect "$target_volume" >/dev/null 2>&1; then
+    spawn_step "criando volume de instancia..."
+    docker volume create "$target_volume" >/dev/null
+    created_target_volume=1
+  fi
+  if ! volume_has_runtime_layout "$target_volume"; then
+    spawn_step "preparando base de instancia..."
+    created_target_volume=1
+  fi
+
+  if [ "$created_target_volume" = "1" ]; then
+    spawn_step "limpando workspace..."
+    reset_target_workspace_from_zero "$target_volume"
+    spawn_step "aplicando imports..."
+    if [ "${#selected_indicators[@]}" -ne 0 ]; then
+      if [ "$import_announced" -eq 0 ]; then
+        spawn_step "importando recursos..."
+        import_announced=1
+      fi
+      copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Indicators" "${selected_indicators[@]}"
+    fi
+    if [ "${#selected_experts[@]}" -ne 0 ]; then
+      if [ "$import_announced" -eq 0 ]; then
+        spawn_step "importando recursos..."
+        import_announced=1
+      fi
+      copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Experts" "${selected_experts[@]}"
+    fi
+    if [ "${#selected_services[@]}" -ne 0 ]; then
+      if [ "$import_announced" -eq 0 ]; then
+        spawn_step "importando recursos..."
+        import_announced=1
+      fi
+      copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Services" "${selected_services[@]}"
+    fi
+    if [ "${#selected_includes[@]}" -ne 0 ]; then
+      if [ "$import_announced" -eq 0 ]; then
+        spawn_step "importando recursos..."
+        import_announced=1
+      fi
+      copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Include" "${selected_includes[@]}"
+    fi
+    if [ "${#selected_libraries[@]}" -ne 0 ]; then
+      if [ "$import_announced" -eq 0 ]; then
+        spawn_step "importando recursos..."
+        import_announced=1
+      fi
+      copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Libraries" "${selected_libraries[@]}"
+    fi
+    if [ "${#selected_scripts[@]}" -ne 0 ]; then
+      if [ "$import_announced" -eq 0 ]; then
+        spawn_step "importando recursos..."
+        import_announced=1
+      fi
+      copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Scripts" "${selected_scripts[@]}"
+    fi
+    if [ "${#selected_files[@]}" -ne 0 ]; then
+      if [ "$import_announced" -eq 0 ]; then
+        spawn_step "importando recursos..."
+        import_announced=1
+      fi
+      copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Files" "${selected_files[@]}"
+    fi
+    spawn_step "preparando projeto..."
+    prepare_codex_layout_in_volume "$target_volume" "$safe_name" fresh
+  else
+    spawn_step "reutilizando volume..."
+    prepare_codex_layout_in_volume "$target_volume" "$safe_name" reuse
+  fi
+  spawn_step "sincronizando recursos..."
+  sync_codex_docs_into_volume "$target_volume"
+  sync_codex_auth_into_volume "$target_volume"
+
+  docker volume inspect "$target_state_volume" >/dev/null 2>&1 || docker volume create "$target_state_volume" >/dev/null
+
+  if container_exists "$target_container"; then
+    if [ -n "$selected_runtime_user" ]; then
+      echo "[dockermt] aviso: instancia ja existe; --user so vale na primeira criacao do container."
+    fi
+    runtime_status="$(current_container_status "$target_container")"
+    if [ "$runtime_status" != "running" ]; then
+      spawn_step "subindo..."
+      docker start "$target_container" >/dev/null
+    fi
+  else
+    spawn_step "alocando portas..."
+    ports="$(allocate_instance_ports)" || { echo "ERR: nao foi possivel reservar portas livres para a nova instancia." >&2; return 1; }
+    IFS='|' read -r telnet_port web_port py_port <<EOF2
+$ports
+EOF2
+    spawn_step "criando container..."
+    docker run -d \
+      --name "$target_container" \
+      --hostname "$target_container" \
+      --gpus all \
+      "${runtime_user_args[@]}" \
+      -e "TITLE=DockerMT [$safe_name]" \
+      -e "DOCKERMT_CONTAINER_NAME=$target_container" \
+      -e "DOCKERMT_INSTANCE_NAME=$safe_name" \
+      -e "DOCKERMT_STATE_VOLUME=$target_state_volume" \
+      -e "TELNETMT_PORT=1122" \
+      -e "MT5_WEB_PORT=3000" \
+      -e "MT5_PY_PORT=8001" \
+      -e "DOCKERMT_HOST_TELNET_PORT=$telnet_port" \
+      -e "DOCKERMT_HOST_WEB_PORT=$web_port" \
+      -e "DOCKERMT_HOST_PY_PORT=$py_port" \
+      -e "DOCKERMT_SNAPSHOT_REPO=$SNAPSHOT_REPO" \
+      -e "DOCKERMT_SNAPSHOT_VOLUME_PREFIX=$SNAPSHOT_VOLUME_PREFIX" \
+      -e "DOCKERMT_PULL_REPO=$PULL_REPO" \
+      -e "DOCKERMT_DOCKER_SOCKET_PATH=$DOCKER_SOCKET_PATH" \
+      -v "${target_volume}:/config" \
+      -v "${DOCKER_SOCKET_PATH}:${DOCKER_SOCKET_PATH}" \
+      -p "${telnet_port}:1122" \
+      -p "${web_port}:3000" \
+      -p "${py_port}:8001" \
+      --label "dockermt.role=instance" \
+      --label "dockermt.instance.name=$safe_name" \
+      --label "dockermt.node.role=instance" \
+      --label "dockermt.node.name=$safe_name" \
+      --label "dockermt.node.parent=$current_name" \
+      --label "dockermt.runtime=1" \
+      --label "dockermt.runtime.name=$safe_name" \
+      --label "dockermt.runtime.parent=$current_name" \
+      --label "dockermt.runtime.config-volume=$target_volume" \
+      "$source_image" >/dev/null
+  fi
+
+  spawn_step "atualizando runtime..."
+  local runtime_src_dockermt="/usr/local/bin/dockermt"
+  local runtime_src_shell="/usr/local/bin/dockermt-instance-shell"
+  local runtime_src_args="/opt/dockermt-full/dist/lib/args.js"
+  local runtime_src_dispatch="/opt/dockermt-full/dist/lib/dispatch.js"
+  if [ -f /config/.dockermt/patches/runtime/dockermt ]; then
+    runtime_src_dockermt="/config/.dockermt/patches/runtime/dockermt"
+  fi
+  if [ -f /config/.dockermt/patches/runtime/dockermt-instance-shell ]; then
+    runtime_src_shell="/config/.dockermt/patches/runtime/dockermt-instance-shell"
+  fi
+  if [ -f /config/.dockermt/patches/runtime/args.js ]; then
+    runtime_src_args="/config/.dockermt/patches/runtime/args.js"
+  fi
+  if [ -f /config/.dockermt/patches/runtime/dispatch.js ]; then
+    runtime_src_dispatch="/config/.dockermt/patches/runtime/dispatch.js"
+  fi
+  docker cp "$runtime_src_dockermt" "${target_container}:/usr/local/bin/dockermt"
+  if [ -f "$runtime_src_shell" ]; then
+    docker cp "$runtime_src_shell" "${target_container}:/usr/local/bin/dockermt-instance-shell"
+  fi
+  if [ -f "$runtime_src_args" ]; then
+    docker cp "$runtime_src_args" "${target_container}:/opt/dockermt-full/dist/lib/args.js"
+  fi
+  if [ -f "$runtime_src_dispatch" ]; then
+    docker cp "$runtime_src_dispatch" "${target_container}:/opt/dockermt-full/dist/lib/dispatch.js"
+  fi
+  docker exec "$target_container" sh -lc 'chmod 755 /usr/local/bin/dockermt /usr/local/bin/dockermt-instance-shell 2>/dev/null || true'
+
+  docker exec "$target_container" /usr/local/bin/dockermt-project-meta init >/dev/null 2>&1 || true
+  record_project_import_batch "$target_container" "Indicators" "${selected_indicators[@]}"
+  record_project_import_batch "$target_container" "Experts" "${selected_experts[@]}"
+  record_project_import_batch "$target_container" "Services" "${selected_services[@]}"
+  record_project_import_batch "$target_container" "Include" "${selected_includes[@]}"
+  record_project_import_batch "$target_container" "Libraries" "${selected_libraries[@]}"
+  record_project_import_batch "$target_container" "Scripts" "${selected_scripts[@]}"
+  record_project_import_batch "$target_container" "Files" "${selected_files[@]}"
+
+  if [ "$created_target_volume" = "1" ] || [ -n "$selected_banner_color" ] || [ -n "$selected_banner_text_color" ]; then
+    spawn_step "aplicando tema..."
+    assign_instance_banner_theme "$target_volume" "$safe_name" "$(current_container_image "$target_container")" "$selected_banner_color" "$selected_banner_text_color"
+  fi
+  spawn_step "finalizando..."
+  rename_instance_mt5_window_in_container "$target_container" ":1" "$safe_name" >/dev/null 2>&1 || true
+
+  cat <<EOF2
+[dockermt] instancia pronta.
+container    : $target_container
+image        : $(current_container_image "$target_container")
+config-volume: $(current_container_config_volume "$target_container")
+state-volume : $target_state_volume
+workspace    : $( [ "$created_target_volume" = "1" ] && printf 'factory' || printf 'existente' )
+imports      : $( [ -n "$imports_summary" ] && printf '%s' "$imports_summary" || printf 'nenhum' )
+project      : /config/.dockermt/codex/session/project
+projects     : dockermt @$safe_name project
+url          : $(runtime_web_url "$target_container")
+telnet       : $(container_host_port "$target_container" "1122" "-")
+python       : $(container_host_port "$target_container" "8001" "-")
+theme        : $( [ -n "$selected_banner_color" ] && printf '%s/%s' "$selected_banner_color" "${selected_banner_text_color:-auto}" || printf 'auto' )
+prompt       : dockermt @$safe_name ...
+shell        : dockermt @$safe_name shell
+open         : dockermt @$safe_name container open
+status       : dockermt @$safe_name container status
+EOF2
+
+  (
+    docker exec "$target_container" /usr/local/bin/dockermt container open >/dev/null 2>&1 || true
+  ) &
+}
+
+runtime_import_named() {
+  local target_container="${1:-}"
+  local target_key="${2:-}"
+  shift 2 || true
+  [ -n "$target_container" ] || { echo "ERR: instancia alvo ausente para import." >&2; return 1; }
+
+  local -a selected_indicators=()
+  local -a selected_experts=()
+  local -a selected_services=()
+  local -a selected_includes=()
+  local -a selected_libraries=()
+  local -a selected_scripts=()
+  local -a selected_files=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --indicator)
+        shift || true
+        selected_indicators+=("${1:-}")
+        ;;
+      --indicator=*)
+        selected_indicators+=("${1#--indicator=}")
+        ;;
+      --expert)
+        shift || true
+        selected_experts+=("${1:-}")
+        ;;
+      --expert=*)
+        selected_experts+=("${1#--expert=}")
+        ;;
+      --service)
+        shift || true
+        selected_services+=("${1:-}")
+        ;;
+      --service=*)
+        selected_services+=("${1#--service=}")
+        ;;
+      --include)
+        shift || true
+        selected_includes+=("${1:-}")
+        ;;
+      --include=*)
+        selected_includes+=("${1#--include=}")
+        ;;
+      --library)
+        shift || true
+        selected_libraries+=("${1:-}")
+        ;;
+      --library=*)
+        selected_libraries+=("${1#--library=}")
+        ;;
+      --script)
+        shift || true
+        selected_scripts+=("${1:-}")
+        ;;
+      --script=*)
+        selected_scripts+=("${1#--script=}")
+        ;;
+      --files)
+        shift || true
+        selected_files+=("${1:-}")
+        ;;
+      --files=*)
+        selected_files+=("${1#--files=}")
+        ;;
+      *)
+        echo "ERR: argumento inesperado em 'dockermt @${target_key} import': $1" >&2
+        return 1
+        ;;
+    esac
+    shift || true
+  done
+
+  if [ "${#selected_indicators[@]}" -eq 0 ] \
+    && [ "${#selected_experts[@]}" -eq 0 ] \
+    && [ "${#selected_services[@]}" -eq 0 ] \
+    && [ "${#selected_includes[@]}" -eq 0 ] \
+    && [ "${#selected_libraries[@]}" -eq 0 ] \
+    && [ "${#selected_scripts[@]}" -eq 0 ] \
+    && [ "${#selected_files[@]}" -eq 0 ]; then
+    echo "ERR: informe ao menos um item para importar." >&2
+    echo "Use: dockermt @${target_key} import --indicator NOME, --expert NOME ou --service NOME" >&2
+    return 1
+  fi
+
+  local current_name source_volume target_volume imports_summary=""
+  current_name="$(resolve_current_runtime_container)"
+  source_volume="$(current_container_config_volume "$current_name")"
+  target_volume="$(current_container_config_volume "$target_container")"
+  [ -n "$source_volume" ] || { echo "ERR: nao foi possivel localizar o volume fonte atual." >&2; return 1; }
+  [ -n "$target_volume" ] || { echo "ERR: nao foi possivel localizar o volume da instancia alvo." >&2; return 1; }
+
+  if [ "$source_volume" = "$target_volume" ]; then
+    echo "ERR: a instancia alvo usa o mesmo volume da instancia atual; import aqui seria redundante." >&2
+    return 1
+  fi
+
+  if [ "${#selected_indicators[@]}" -ne 0 ]; then
+    copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Indicators" "${selected_indicators[@]}" || return 1
+  fi
+  if [ "${#selected_experts[@]}" -ne 0 ]; then
+    copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Experts" "${selected_experts[@]}" || return 1
+  fi
+  if [ "${#selected_services[@]}" -ne 0 ]; then
+    copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Services" "${selected_services[@]}" || return 1
+  fi
+  if [ "${#selected_includes[@]}" -ne 0 ]; then
+    copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Include" "${selected_includes[@]}" || return 1
+  fi
+  if [ "${#selected_libraries[@]}" -ne 0 ]; then
+    copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Libraries" "${selected_libraries[@]}" || return 1
+  fi
+  if [ "${#selected_scripts[@]}" -ne 0 ]; then
+    copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Scripts" "${selected_scripts[@]}" || return 1
+  fi
+  if [ "${#selected_files[@]}" -ne 0 ]; then
+    copy_selected_mql5_items_into_volume "$source_volume" "$target_volume" "Files" "${selected_files[@]}" || return 1
+  fi
+
+  docker exec "$target_container" /usr/local/bin/dockermt-project-meta init >/dev/null 2>&1 || true
+  record_project_import_batch "$target_container" "Indicators" "${selected_indicators[@]}"
+  record_project_import_batch "$target_container" "Experts" "${selected_experts[@]}"
+  record_project_import_batch "$target_container" "Services" "${selected_services[@]}"
+  record_project_import_batch "$target_container" "Include" "${selected_includes[@]}"
+  record_project_import_batch "$target_container" "Libraries" "${selected_libraries[@]}"
+  record_project_import_batch "$target_container" "Scripts" "${selected_scripts[@]}"
+  record_project_import_batch "$target_container" "Files" "${selected_files[@]}"
+
+  [ "${#selected_indicators[@]}" -eq 0 ] || imports_summary="${imports_summary} indicators=$(printf '%s,' "${selected_indicators[@]}" | sed 's/,$//')"
+  [ "${#selected_experts[@]}" -eq 0 ] || imports_summary="${imports_summary} experts=$(printf '%s,' "${selected_experts[@]}" | sed 's/,$//')"
+  [ "${#selected_services[@]}" -eq 0 ] || imports_summary="${imports_summary} services=$(printf '%s,' "${selected_services[@]}" | sed 's/,$//')"
+  [ "${#selected_includes[@]}" -eq 0 ] || imports_summary="${imports_summary} include=$(printf '%s,' "${selected_includes[@]}" | sed 's/,$//')"
+  [ "${#selected_libraries[@]}" -eq 0 ] || imports_summary="${imports_summary} libraries=$(printf '%s,' "${selected_libraries[@]}" | sed 's/,$//')"
+  [ "${#selected_scripts[@]}" -eq 0 ] || imports_summary="${imports_summary} scripts=$(printf '%s,' "${selected_scripts[@]}" | sed 's/,$//')"
+  [ "${#selected_files[@]}" -eq 0 ] || imports_summary="${imports_summary} files=$(printf '%s,' "${selected_files[@]}" | sed 's/,$//')"
+  imports_summary="${imports_summary# }"
+
+  cat <<EOF2
+[dockermt] import concluido.
+instance     : ${target_container}
+config-volume: ${target_volume}
+imports      : ${imports_summary}
+projects     : dockermt @${target_key} project
+shell        : dockermt @${target_key} shell
+open         : dockermt @${target_key} container open
+EOF2
+}
+
+runtime_save_alias() {
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    name="$(date -u +dockermt-review-%Y%m%dT%H%M%SZ)"
+  fi
+  snapshot_commit -m "$name" -n "$name"
+}
+
+runtime_restore_alias() {
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    echo "ERR: uso: dockermt container restore <estado>" >&2
+    exit 1
+  fi
+  snapshot_select "$name"
+}
+
+current_container_snapshot_id() {
+  local ref
+  ref="$(current_container_image)"
+  [ -n "$ref" ] || return 0
+  docker image inspect "$ref" --format '{{index .Config.Labels "dockermt.snapshot.id"}}' 2>/dev/null || true
+}
+
+snapshot_id_from_image_ref() {
+  local ref="${1:-}"
+  [ -n "$ref" ] || return 1
+  docker image inspect "$ref" --format '{{index .Config.Labels "dockermt.snapshot.id"}}' 2>/dev/null | awk 'NF && $0 != "<no value>" {print; found=1} END{exit(found?0:1)}'
+}
+
+resolve_snapshot_id_from_input() {
+  local raw="${1:-}"
+  local ref snapshot_id
+  if [ -z "$raw" ]; then
+    snapshot_id="$(selected_snapshot_id)"
+    [ -n "$snapshot_id" ] || snapshot_id="$(latest_snapshot_id)"
+    [ -n "$snapshot_id" ] || return 1
+    printf '%s\n' "$snapshot_id"
+    return 0
+  fi
+
+  ref="$(snapshot_image_ref_from_id "$raw")"
+  if snapshot_id="$(snapshot_id_from_image_ref "$ref" 2>/dev/null)"; then
+    printf '%s\n' "$snapshot_id"
+    return 0
+  fi
+  if snapshot_id="$(snapshot_id_from_image_ref "$raw" 2>/dev/null)"; then
+    printf '%s\n' "$snapshot_id"
+    return 0
+  fi
+  ref="$(resolve_pull_image_ref "$raw" 2>/dev/null || true)"
+  if [ -n "$ref" ] && snapshot_id="$(snapshot_id_from_image_ref "$ref" 2>/dev/null)"; then
+    printf '%s\n' "$snapshot_id"
+    return 0
+  fi
+  return 1
+}
+
+next_snapshot_version() {
+  local safe_name="$1"
+  local current
+  current="$({ docker image ls "$SNAPSHOT_REPO" --format '{{.Tag}}' 2>/dev/null || true; } |
+    sed -n "s/^${safe_name}\.v\([0-9][0-9]*\)-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]$/\1/p" |
+    sort -n |
+    tail -n 1)"
+  if [ -z "$current" ]; then
+    printf '1\n'
+    return 0
+  fi
+  printf '%s\n' "$((current + 1))"
+}
+
+named_snapshot_rows() {
+  local safe_name="$1"
+  docker image ls "$SNAPSHOT_REPO" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | while read -r ref; do
+    [ -n "$ref" ] || continue
+    local inspect_out snapshot_name snapshot_version snapshot_timestamp snapshot_id volume_name
+    inspect_out="$(docker image inspect "$ref" --format '{{index .Config.Labels "dockermt.snapshot.name"}}|{{index .Config.Labels "dockermt.snapshot.version"}}|{{index .Config.Labels "dockermt.snapshot.timestamp"}}|{{index .Config.Labels "dockermt.snapshot.id"}}' 2>/dev/null || true)"
+    snapshot_name="$(printf '%s' "$inspect_out" | cut -d'|' -f1)"
+    snapshot_version="$(printf '%s' "$inspect_out" | cut -d'|' -f2)"
+    snapshot_timestamp="$(printf '%s' "$inspect_out" | cut -d'|' -f3)"
+    snapshot_id="$(printf '%s' "$inspect_out" | cut -d'|' -f4)"
+    if [ "$snapshot_name" != "$safe_name" ] || [ -z "$snapshot_id" ] || [ "$snapshot_id" = "<no value>" ]; then
+      continue
+    fi
+    volume_name="$(snapshot_volume_name_from_id "$snapshot_id")"
+    printf '%s|%s|%s|%s|%s\n' "$snapshot_id" "$snapshot_version" "$snapshot_timestamp" "$ref" "$volume_name"
+  done | sort -t'|' -k3,3
+}
+
+snapshot_count_for_name() {
+  local safe_name="$1"
+  local count=0
+  while IFS= read -r _row; do
+    [ -n "$_row" ] || continue
+    count=$((count + 1))
+  done <<EOF2
+$(named_snapshot_rows "$safe_name")
+EOF2
+  printf '%s\n' "$count"
+}
+
+delete_snapshot_local() {
+  local snapshot_id="$1"
+  local image_ref volume_name selected_id
+  image_ref="$(snapshot_image_ref_from_id "$snapshot_id")"
+  volume_name="$(snapshot_volume_name_from_id "$snapshot_id")"
+  selected_id="$(selected_snapshot_id)"
+  if [ "$selected_id" = "$snapshot_id" ]; then
+    clear_selected_snapshot_id
+  fi
+  docker image rm -f "$image_ref" >/dev/null 2>&1 || true
+  docker volume rm "$volume_name" >/dev/null 2>&1 || true
+}
+
+prune_named_snapshots() {
+  local safe_name="$1"
+  local keep_snapshot_id="${2:-}"
+  local count deleted prune_snapshot_id
+  count="$(snapshot_count_for_name "$safe_name")"
+  if [ "$count" -le "$MAX_SNAPSHOTS_PER_NAME" ]; then
+    return 0
+  fi
+
+  deleted=0
+  while IFS='|' read -r prune_snapshot_id _snapshot_version _snapshot_timestamp _image_ref _volume_name; do
+    [ -n "$prune_snapshot_id" ] || continue
+    if [ -n "$keep_snapshot_id" ] && [ "$prune_snapshot_id" = "$keep_snapshot_id" ]; then
+      continue
+    fi
+    if [ "$count" -le "$MAX_SNAPSHOTS_PER_NAME" ]; then
+      break
+    fi
+    echo "[dockermt] removendo snapshot antigo para manter o limite de ${MAX_SNAPSHOTS_PER_NAME}: $prune_snapshot_id"
+    delete_snapshot_local "$prune_snapshot_id"
+    count=$((count - 1))
+    deleted=$((deleted + 1))
+  done <<EOF2
+$(named_snapshot_rows "$safe_name")
+EOF2
+
+  if [ "$count" -gt "$MAX_SNAPSHOTS_PER_NAME" ]; then
+    echo "WARN: alguns snapshots antigos ainda nao puderam ser removidos; sera necessario recriar o runtime e repetir a limpeza." >&2
+  fi
+}
+
+print_snapshots() {
+  local current_image current_volume latest_id latest_image latest_volume selected_id selected_image selected_volume rows found
+  current_image="$(current_container_image)"
+  current_volume="$(current_container_config_volume)"
+  latest_id="$(latest_snapshot_id)"
+  latest_image=""
+  latest_volume=""
+  selected_id="$(selected_snapshot_id)"
+  selected_image=""
+  selected_volume=""
+  rows=""
+  found=0
+
+  if [ -n "$latest_id" ]; then
+    latest_image="$(snapshot_image_ref_from_id "$latest_id")"
+    latest_volume="$(snapshot_volume_name_from_id "$latest_id")"
+  fi
+  if [ -n "$selected_id" ]; then
+    selected_image="$(snapshot_image_ref_from_id "$selected_id")"
+    selected_volume="$(snapshot_volume_name_from_id "$selected_id")"
+  fi
+
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    local inspect_out snapshot_id timestamp message volume_name active_mark selected_mark latest_mark
+    inspect_out="$(docker image inspect "$ref" --format '{{index .Config.Labels "dockermt.snapshot.timestamp"}}|{{index .Config.Labels "dockermt.snapshot.id"}}|{{.Comment}}' 2>/dev/null || true)"
+    snapshot_id="$(printf '%s' "$inspect_out" | cut -d'|' -f2)"
+    timestamp="$(printf '%s' "$inspect_out" | cut -d'|' -f1)"
+    message="$(printf '%s' "$inspect_out" | cut -d'|' -f3- | tr '\t\r\n' '   ')"
+    if [ -z "$snapshot_id" ] || [ "$snapshot_id" = "<no value>" ] || [ -z "$timestamp" ] || [ "$timestamp" = "<no value>" ]; then
+      continue
+    fi
+    volume_name="$(snapshot_volume_name_from_id "$snapshot_id")"
+    active_mark=""
+    selected_mark=""
+    latest_mark=""
+    if [ "$ref" = "$current_image" ] && [ "$volume_name" = "$current_volume" ]; then
+      active_mark="*"
+    fi
+    if [ "$ref" = "$selected_image" ] && [ "$volume_name" = "$selected_volume" ]; then
+      selected_mark="*"
+    fi
+    if [ "$ref" = "$latest_image" ] && [ "$volume_name" = "$latest_volume" ]; then
+      latest_mark="*"
+    fi
+    rows="${rows}$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$active_mark" "$selected_mark" "$latest_mark" "$snapshot_id" "$ref" "$volume_name" "${message:--}")"$'\n'
+    found=1
+  done <<EOF2
+$(docker image ls "$SNAPSHOT_REPO" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null)
+EOF2
+
+  if [ "$found" -eq 0 ]; then
+    echo "[dockermt] nenhum snapshot encontrado em '$SNAPSHOT_REPO'."
+    return 0
+  fi
+
+  {
+    printf 'ACTIVE\tSELECTED\tLATEST\tSNAPSHOT\tIMAGE\tVOLUME\tMESSAGE\n'
+    printf '%s' "$rows" | sort -r -k4,4
+  } | if command -v column >/dev/null 2>&1; then
+        column -ts "$(printf '\t')"
+      else
+        cat
+      fi
+}
+
+snapshot_commit() {
+  require_docker
+  local message=""
+  local raw_name="snapshot"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -m|--message)
+        shift
+        [ "$#" -gt 0 ] || { echo "ERR: faltou texto para -m/--message." >&2; return 1; }
+        message="$1"
+        ;;
+      -n|--name)
+        shift
+        [ "$#" -gt 0 ] || { echo "ERR: faltou texto para -n/--name." >&2; return 1; }
+        raw_name="$1"
+        ;;
+      *)
+        echo "ERR: flag desconhecida em container commit: $1" >&2
+        return 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$message" ]; then
+    echo "ERR: informe -m 'mensagem'." >&2
+    return 1
+  fi
+
+  local safe_name timestamp version snapshot_id image_ref source_volume target_volume source_image
+  safe_name="$(sanitize_snapshot_name "$raw_name")"
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  local current_runtime_name
+  current_runtime_name="$(resolve_current_runtime_container)"
+  source_volume="$(current_container_config_volume "$current_runtime_name")"
+  source_image="$(current_container_image "$current_runtime_name")"
+  version="$(next_snapshot_version "$safe_name")"
+  snapshot_id="$(build_snapshot_id "$safe_name" "$version" "$timestamp")"
+  image_ref="$(snapshot_image_ref_from_id "$snapshot_id")"
+  target_volume="$(snapshot_volume_name_from_id "$snapshot_id")"
+
+  if [ -z "$source_volume" ]; then
+    echo "ERR: nao foi possivel localizar o volume /config do container '$current_runtime_name'." >&2
+    return 1
+  fi
+  if docker image inspect "$image_ref" >/dev/null 2>&1; then
+    echo "ERR: imagem '$image_ref' ja existe." >&2
+    return 1
+  fi
+  if docker volume inspect "$target_volume" >/dev/null 2>&1; then
+    echo "ERR: volume '$target_volume' ja existe." >&2
+    return 1
+  fi
+
+  echo "[dockermt] criando snapshot da imagem: $image_ref"
+  docker commit --pause=false \
+    -m "$message" \
+    --change "LABEL dockermt.snapshot.id=$snapshot_id" \
+    --change "LABEL dockermt.snapshot.name=$safe_name" \
+    --change "LABEL dockermt.snapshot.version=$version" \
+    --change "LABEL dockermt.snapshot.timestamp=$timestamp" \
+    --change "LABEL dockermt.snapshot.source_image=$source_image" \
+    --change "LABEL dockermt.snapshot.source_volume=$source_volume" \
+    "$current_runtime_name" "$image_ref" >/dev/null
+
+  echo "[dockermt] clonando volume '$source_volume' para '$target_volume'..."
+  docker volume create \
+    --label "dockermt.snapshot.id=$snapshot_id" \
+    --label "dockermt.snapshot.name=$safe_name" \
+    --label "dockermt.snapshot.version=$version" \
+    --label "dockermt.snapshot.timestamp=$timestamp" \
+    --label "dockermt.snapshot.image=$image_ref" \
+    "$target_volume" >/dev/null
+  docker run --rm -v "${source_volume}:/from:ro" -v "${target_volume}:/to" alpine sh -lc \
+    'cd /from && tar cf - . | (cd /to && tar xf -)'
+
+  set_selected_snapshot_id "$snapshot_id"
+  prune_named_snapshots "$safe_name" "$snapshot_id"
+
+  cat <<EOF2
+[dockermt] snapshot salvo.
+snapshot_id : $snapshot_id
+image       : $image_ref
+volume      : $target_volume
+message     : $message
+EOF2
+}
+
+snapshot_pull() {
+  require_docker
+  local raw_ref="${1:-}"
+  local remote_ref snapshot_id local_ref target_volume
+  if [ -z "$raw_ref" ]; then
+    echo "ERR: informe o nome/tag da imagem. Ex.: dockermt container pull paradigm-3.0.v4-20260310-071305" >&2
+    return 1
+  fi
+  remote_ref="$(resolve_pull_image_ref "$raw_ref")" || {
+    echo "ERR: nao foi possivel resolver a imagem para pull." >&2
+    return 1
+  }
+
+  echo "[dockermt] baixando imagem: $remote_ref"
+  docker pull "$remote_ref"
+
+  snapshot_id="$(docker image inspect "$remote_ref" --format '{{index .Config.Labels "dockermt.snapshot.id"}}' 2>/dev/null || true)"
+  if [ -z "$snapshot_id" ] || [ "$snapshot_id" = "<no value>" ]; then
+    echo "ERR: a imagem '$remote_ref' nao contem metadados de snapshot." >&2
+    return 1
+  fi
+
+  local_ref="$(snapshot_image_ref_from_id "$snapshot_id")"
+  docker tag "$remote_ref" "$local_ref"
+
+  target_volume="$(snapshot_volume_name_from_id "$snapshot_id")"
+  if docker volume inspect "$target_volume" >/dev/null 2>&1; then
+    echo "[dockermt] volume vinculado ja existe: $target_volume"
+  else
+    echo "[dockermt] criando volume vinculado: $target_volume"
+    docker volume create \
+      --label "dockermt.snapshot.id=$snapshot_id" \
+      --label "dockermt.snapshot.image=$local_ref" \
+      "$target_volume" >/dev/null
+    echo "[dockermt] nenhum backup local do volume foi encontrado; o volume vinculado foi criado vazio."
+  fi
+
+  set_selected_snapshot_id "$snapshot_id"
+
+  cat <<EOF2
+[dockermt] snapshot importado.
+snapshot_id : $snapshot_id
+remote      : $remote_ref
+image       : $local_ref
+volume      : $target_volume
+EOF2
+}
+
+snapshot_push() {
+  require_docker
+  local raw_ref="${1:-}"
+  local snapshot_id local_ref remote_ref
+  snapshot_id="$(resolve_snapshot_id_from_input "$raw_ref" 2>/dev/null || true)"
+  if [ -z "$snapshot_id" ]; then
+    echo "ERR: nao foi possivel localizar o snapshot para push." >&2
+    return 1
+  fi
+  local_ref="$(snapshot_image_ref_from_id "$snapshot_id")"
+  if ! docker image inspect "$local_ref" >/dev/null 2>&1; then
+    echo "ERR: imagem local '$local_ref' nao encontrada." >&2
+    return 1
+  fi
+  remote_ref="${PULL_REPO}:$snapshot_id"
+  docker tag "$local_ref" "$remote_ref"
+  echo "[dockermt] publicando imagem: $remote_ref"
+  docker push "$remote_ref"
+  cat <<EOF2
+[dockermt] snapshot publicado.
+snapshot_id : $snapshot_id
+image       : $local_ref
+remote      : $remote_ref
+EOF2
+}
+
+dukascopy_sync() {
+  if ! command -v node >/dev/null 2>&1; then
+    echo "ERR: node nao encontrado no container." >&2
+    return 127
+  fi
+  if [ ! -f "$DUKASCOPY_SCRIPT_PATH" ]; then
+    echo "ERR: script privado da Dukascopy nao encontrado em '$DUKASCOPY_SCRIPT_PATH'." >&2
+    return 1
+  fi
+
+  local json_output
+  json_output="$(node "$DUKASCOPY_SCRIPT_PATH" mail --quiet --no-debug --json --all-valid)"
+
+  JSON_INPUT="$json_output" python3 - "$DUKASCOPY_STATE_FILE" "$DUKASCOPY_ENV_FILE" "$MT5_COMMON_INI_PATH" <<'PY'
+import json
+import os
+import pathlib
+import sys
+from datetime import datetime
+
+state_path = pathlib.Path(sys.argv[1])
+env_path = pathlib.Path(sys.argv[2])
+common_ini_path = pathlib.Path(sys.argv[3])
+raw = os.environ.get("JSON_INPUT", "").strip()
+
+if not raw:
+    print("ERR: o executavel privado da Dukascopy nao retornou JSON.", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    payload = json.loads(raw)
+except json.JSONDecodeError as exc:
+    print(f"ERR: JSON invalido retornado pelo executavel privado: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+credentials = payload.get("credentials") or []
+valid_credentials = [c for c in credentials if c.get("valid")]
+if not valid_credentials:
+    print("ERR: nenhuma credencial valida foi encontrada no lookback atual.", file=sys.stderr)
+    sys.exit(1)
+
+def remaining_ms(item):
+    try:
+        return int(item.get("remainingMs", 0))
+    except Exception:
+        return 0
+
+best = {}
+for kind in ("mt5", "jforex", "mt4"):
+    subset = [item for item in valid_credentials if item.get("kind") == kind]
+    if subset:
+        best[kind] = max(subset, key=remaining_ms)
+
+if "mt5" not in best:
+    print("ERR: nenhuma credencial valida de MetaTrader 5 foi encontrada.", file=sys.stderr)
+    sys.exit(1)
+
+primary = best["mt5"]
+mt5_valid_credentials = [item for item in valid_credentials if item.get("kind") == "mt5"]
+
+state_payload = {
+    "syncedAt": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+    "source": {
+        "generatedAt": payload.get("generatedAt"),
+        "count": payload.get("count", len(credentials)),
+        "validCount": len(mt5_valid_credentials),
+    },
+    "primaryKind": "mt5",
+    "primary": primary,
+    "selected": {"mt5": primary},
+    "allValid": mt5_valid_credentials,
+    "notes": [
+        "A credencial operacional do sync e sempre a do MetaTrader 5.",
+        "MT5 common.ini recebeu Login, Server, Password e KeepPrivate=1.",
+        "O campo Environment do common.ini foi limpo para o proprio MT5 regravar a credencial cifrada.",
+    ],
+}
+
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state_payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+
+with env_path.open("w", encoding="utf-8") as fh:
+    fh.write("# Gerado por: dockermt dukascopy sync\n")
+    fh.write("DUKASCOPY_PRIMARY_KIND=\"mt5\"\n")
+    fh.write(f"DUKASCOPY_LOGIN={json.dumps(primary.get('login', ''))}\n")
+    fh.write(f"DUKASCOPY_PASSWORD={json.dumps(primary.get('password', ''))}\n")
+    if primary.get("server"):
+        fh.write(f"DUKASCOPY_SERVER={json.dumps(primary.get('server', ''))}\n")
+    fh.write(f"DUKASCOPY_EXPIRES_AT={json.dumps(primary.get('expiresAt', ''))}\n")
+    fh.write(f"DUKASCOPY_REMAINING_MS={json.dumps(str(primary.get('remainingMs', 0)))}\n")
+    fh.write(f"DUKASCOPY_MT5_LOGIN={json.dumps(primary.get('login', ''))}\n")
+    fh.write(f"DUKASCOPY_MT5_PASSWORD={json.dumps(primary.get('password', ''))}\n")
+    if primary.get("server"):
+        fh.write(f"DUKASCOPY_MT5_SERVER={json.dumps(primary.get('server', ''))}\n")
+    fh.write(f"DUKASCOPY_MT5_EXPIRES_AT={json.dumps(primary.get('expiresAt', ''))}\n")
+    fh.write(f"DUKASCOPY_MT5_REMAINING_MS={json.dumps(str(primary.get('remainingMs', 0)))}\n")
+
+common_ini_status = "nao encontrado"
+if common_ini_path.exists():
+    raw_bytes = common_ini_path.read_bytes()
+    encoding = "utf-8"
+    bom = b""
+    text = None
+    for enc, enc_bom in (("utf-16le", b"\xff\xfe"), ("utf-8", b""), ("latin1", b"")):
+        try:
+            probe = raw_bytes
+            if enc == "utf-16le" and raw_bytes.startswith(enc_bom):
+                probe = raw_bytes[len(enc_bom):]
+            text = probe.decode(enc)
+            encoding = enc
+            bom = enc_bom if raw_bytes.startswith(enc_bom) else b""
+            break
+        except Exception:
+            continue
+    if text is None:
+        print(f"ERR: nao foi possivel decodificar {common_ini_path}", file=sys.stderr)
+        sys.exit(1)
+
+    mt5 = primary
+    lines = text.splitlines()
+    found_login = False
+    found_server = False
+    found_password = False
+    found_keep_private = False
+    found_environment = False
+    for idx, line in enumerate(lines):
+        if line.startswith("Login="):
+            lines[idx] = f"Login={mt5.get('login', '')}"
+            found_login = True
+        elif line.startswith("Server="):
+            lines[idx] = f"Server={mt5.get('server', '')}"
+            found_server = True
+        elif line.startswith("Password="):
+            lines[idx] = f"Password={mt5.get('password', '')}"
+            found_password = True
+        elif line.startswith("KeepPrivate="):
+            lines[idx] = "KeepPrivate=1"
+            found_keep_private = True
+        elif line.startswith("Environment="):
+            lines[idx] = "Environment="
+            found_environment = True
+
+    if not found_login:
+        lines.append(f"Login={mt5.get('login', '')}")
+    if not found_server:
+        lines.append(f"Server={mt5.get('server', '')}")
+    if not found_password:
+        lines.append(f"Password={mt5.get('password', '')}")
+    if not found_keep_private:
+        lines.append("KeepPrivate=1")
+    if not found_environment:
+        lines.append("Environment=")
+
+    new_text = "\r\n".join(lines) + "\r\n"
+    encoded = new_text.encode(encoding)
+    if encoding == "utf-16le" and bom:
+        encoded = bom + encoded
+    common_ini_path.write_bytes(encoded)
+    common_ini_status = "atualizado"
+
+print("[dockermt] Dukascopy sincronizado.")
+print(f"state_file   : {state_path}")
+print(f"env_file     : {env_path}")
+print(f"common_ini   : {common_ini_path} ({common_ini_status})")
+print(f"primary_kind : mt5")
+print(f"mt5_login    : {primary.get('login', '-')}")
+print(f"mt5_server   : {primary.get('server', '-') or '-'}")
+print(f"mt5_expira   : {primary.get('expiresAt', '-')}")
+PY
+}
+
+snapshot_select() {
+  require_docker
+  local raw_ref="${1:-}"
+  local snapshot_id local_ref volume_name
+  if [ -z "$raw_ref" ]; then
+    echo "ERR: informe o snapshot a selecionar." >&2
+    return 1
+  fi
+  snapshot_id="$(resolve_snapshot_id_from_input "$raw_ref" 2>/dev/null || true)"
+  if [ -z "$snapshot_id" ]; then
+    echo "ERR: snapshot nao localizado: $raw_ref" >&2
+    return 1
+  fi
+  local_ref="$(snapshot_image_ref_from_id "$snapshot_id")"
+  volume_name="$(snapshot_volume_name_from_id "$snapshot_id")"
+  if ! docker image inspect "$local_ref" >/dev/null 2>&1; then
+    echo "ERR: imagem '$local_ref' nao esta local." >&2
+    return 1
+  fi
+  if ! docker volume inspect "$volume_name" >/dev/null 2>&1; then
+    echo "ERR: volume '$volume_name' nao esta local." >&2
+    return 1
+  fi
+  set_selected_snapshot_id "$snapshot_id"
+  cat <<EOF2
+[dockermt] snapshot selecionado.
+snapshot_id : $snapshot_id
+image       : $local_ref
+volume      : $volume_name
+EOF2
+}
 
 _send_line() {
   local line="$1"
@@ -42,16 +5059,100 @@ except Exception as e:
 PY
 }
 
+_legacy_command_disabled() {
+  echo "ERR: comando removido deste runtime do dockermt." >&2
+  exit 1
+}
+
+_socket_namespace_removed() {
+  echo "ERR: o namespace 'socket' foi removido da interface publica do dockermt." >&2
+  echo "Use o comando final diretamente, por exemplo: 'dockermt chart' ou 'dockermt help chart open'." >&2
+  exit 1
+}
+
+_host_integration_disabled() {
+  echo "ERR: integracao com host foi desabilitada neste runtime do dockermt." >&2
+  echo "Use apenas comandos container-only dentro do proprio runtime." >&2
+  exit 1
+}
+
+_route_named_runtime() {
+  local raw="${1:-}"
+  local target_key target_container current_name current_label
+  case "$raw" in
+    @*)
+      ROUTED_EXPLICIT_TARGET=1
+      target_key="${raw#@}"
+      [ -n "$target_key" ] || { echo "ERR: instancia vazia em '@'." >&2; exit 1; }
+      target_container="$(normalize_runtime_target "$target_key")"
+      container_exists "$target_container" || { echo "ERR: instancia nao localizada: $target_key" >&2; exit 1; }
+      runtime_ensure_running "$target_container" || { echo "ERR: nao foi possivel iniciar a instancia: $target_key" >&2; exit 1; }
+      shift || true
+      if [ "$#" -eq 0 ]; then
+        set -- container status
+      fi
+      current_name="$(resolve_current_runtime_container)"
+      case "${1:-}" in
+        shell)
+          shift || true
+          docker_exec_runtime_shell "$target_container" "$target_key" "$@"
+          exit $?
+          ;;
+        import)
+          shift || true
+          runtime_import_named "$target_container" "$target_key" "$@"
+          exit $?
+          ;;
+        sync)
+          echo "ERR: comando removido: dockermt @${target_key} sync" >&2
+          exit 1
+          ;;
+      esac
+      if [ "$target_container" = "$current_name" ]; then
+        export DOCKERMT_CONTAINER_NAME="$target_container"
+        ROUTED_ARGS=("$@")
+        return 0
+      fi
+      current_label="$(runtime_short_name "$current_name")"
+      echo "[dockermt] roteamento: @${target_key} via ${current_label} -> ${target_container}"
+      DOCKERMT_ROUTED_EXPLICIT_TARGET=1 docker_exec_runtime_cli "$target_container" "$@"
+      exit $?
+      ;;
+  esac
+  return 1
+}
+
+ROUTED_EXPLICIT_TARGET="${DOCKERMT_ROUTED_EXPLICIT_TARGET:-0}"
+ROUTED_ARGS=("$@")
+if _route_named_runtime "$@"; then
+  set -- "${ROUTED_ARGS[@]}"
+fi
+CMD="${1:-help}"
+
 case "$CMD" in
-  version)
-    echo "${DOCKERMT_VERSION:-unknown}"
-    exit 0
+  help|-h|--help)
+    shift || true
+    if [ "$#" -eq 0 ]; then
+      _usage
+    else
+      _root_topic_usage "$@" || {
+        if _extension_command_path "${1:-}" >/dev/null 2>&1; then
+          _run_extension_command "${1:-}" help "${@:2}"
+        else
+          echo "ERR: topico de ajuda desconhecido: $*" >&2
+          _usage >&2
+          exit 1
+        fi
+      }
+    fi
     ;;
   map)
     cat <<EOF2
 DOCKERMT Container Map
 ======================
 Container: ${HOSTNAME:-dockermt}
+DockerMT: ${DOCKERMT_VERSION_CURRENT}
+Socket CLI: ${DOCKERMT_VERSION_CURRENT}
 
 Ports
 -----
@@ -65,22 +5166,188 @@ Important paths
 - /config/.wine/drive_c/Program Files/MetaTrader 5
 - /config/.wine/drive_c/Program Files/MetaTrader 5/MQL5
 - /config/.wine/drive_c/Program Files/MetaTrader 5/Config/services.ini
-- /opt/dockermt-full
 - /usr/local/bin/dockermt
+- Docker socket: ${DOCKER_SOCKET_PATH}
 EOF2
-    exit 0
     ;;
   send)
-    shift || true
-    [ "$#" -gt 0 ] || { echo "ERR: informe linha para enviar. Ex: dockermt send '1|PING'" >&2; exit 1; }
-    _send_line "$*"
-    exit 0
+    _legacy_command_disabled
     ;;
   ping)
     _send_line "1|PING"
-    exit 0
+    ;;
+  shell)
+    shift || true
+    runtime_shell_current "$@"
+    ;;
+  instance|whoami)
+    shift || true
+    sub="${1:-show}"
+    case "$sub" in
+      list|instances|ls|factory|create)
+        if [ "${ROUTED_EXPLICIT_TARGET:-0}" != "1" ] && runtime_is_instance "$(resolve_current_runtime_container)"; then
+          central_runtime_name="$(resolve_central_runtime_container)"
+          if [ -n "$central_runtime_name" ] && [ "$central_runtime_name" != "$(resolve_current_runtime_container)" ]; then
+            docker_exec_runtime_cli "$central_runtime_name" instance "$sub" "${@:2}"
+            exit $?
+          fi
+        fi
+        ;;
+    esac
+    case "$sub" in
+      show|name|"")
+        printf '%s\n' "$(runtime_short_name "$(resolve_current_runtime_container)")"
+        ;;
+      list|instances|ls)
+        print_runtime_instances
+        ;;
+      factory)
+        shift || true
+        print_factory_workspace_info "${1:-show}"
+        ;;
+      create)
+        shift || true
+        runtime_spawn "$@"
+        ;;
+      rename)
+        shift || true
+        runtime_instance_rename_request "${1:-}"
+        ;;
+      help|-h|--help)
+        _root_topic_usage instance
+        ;;
+      *)
+        echo "ERR: subcomando desconhecido em 'dockermt instance': $sub" >&2
+        _root_topic_usage instance >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  project)
+    shift || true
+    project_meta_cli "$@"
+    ;;
+  socket)
+    _socket_namespace_removed
+    ;;
+  dukascopy)
+    shift || true
+    sub="${1:-help}"
+    shift || true
+    case "$sub" in
+      help|-h|--help)
+        if [ "$#" -eq 0 ]; then
+          _dukascopy_usage
+        else
+          _dukascopy_topic_usage "$1"
+        fi
+        ;;
+      sync)
+        dukascopy_sync
+        ;;
+      *)
+        echo "ERR: subcomando desconhecido em 'dockermt dukascopy': $sub" >&2
+        _dukascopy_usage >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  container)
+    if [ "${ROUTED_EXPLICIT_TARGET:-0}" != "1" ] && runtime_is_instance "$(resolve_current_runtime_container)"; then
+      implied_sub="${2:-status}"
+      if [ "$implied_sub" = "open" ]; then
+        self_short="$(runtime_short_name "$(resolve_current_runtime_container)")"
+        echo "ERR: 'dockermt container open' dentro da instancia exige alvo explicito com @." >&2
+        echo "Use: dockermt @${self_short} container open" >&2
+        exit 1
+      fi
+      central_runtime_name="$(resolve_central_runtime_container)"
+      if [ -n "$central_runtime_name" ] && [ "$central_runtime_name" != "$(resolve_current_runtime_container)" ]; then
+        docker_exec_runtime_cli "$central_runtime_name" "$@"
+        exit $?
+      fi
+    fi
+    shift || true
+    sub="${1:-status}"
+    shift || true
+    case "$sub" in
+      help|-h|--help)
+        if [ "$#" -eq 0 ]; then
+          _container_usage
+        else
+          _container_topic_usage "$1"
+        fi
+        ;;
+      status)
+        print_runtime_status "${1:-}"
+        ;;
+      map)
+        _legacy_command_disabled
+        ;;
+      up)
+        runtime_up "${1:-}"
+        ;;
+      open)
+        runtime_open "$@"
+        ;;
+      list)
+        print_snapshots
+        ;;
+      save)
+        runtime_save_alias "${1:-}"
+        ;;
+      restore)
+        runtime_restore_alias "${1:-}"
+        ;;
+      commit)
+        snapshot_commit "$@"
+        ;;
+      pull)
+        snapshot_pull "${1:-}"
+        ;;
+      push)
+        snapshot_push "${1:-}"
+        ;;
+      select)
+        snapshot_select "${1:-}"
+        ;;
+      snapshots)
+        print_snapshots
+        ;;
+      *)
+        echo "ERR: subcomando desconhecido em 'dockermt container': $sub" >&2
+        _container_usage >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  shim-print)
+    _host_integration_disabled
+    ;;
+  install-shim)
+    _host_integration_disabled
+    ;;
+  install-help)
+    _host_integration_disabled
+    ;;
+  install)
+    shift || true
+    runtime_install "$@"
+    ;;
+  sync)
+    echo "ERR: comando removido: dockermt sync" >&2
+    exit 1
+    ;;
+  _instance-rename)
+    shift || true
+    runtime_instance_rename_apply "$@"
+    ;;
+  *)
+    if _extension_command_path "$CMD" >/dev/null 2>&1; then
+      shift || true
+      _run_extension_command "$CMD" "$@"
+    else
+      socket_cli "$@"
+    fi
     ;;
 esac
-
-export CMDMT_BRAND=dockermt
-exec node /opt/dockermt-full/dist/index.js "$@"

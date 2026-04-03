@@ -216,3 +216,17 @@ dockermt container set default image dockermt:3.1.1
 dockermt container set default vol dockermt_config
 dockermt container set default restart unless-stopped
 ```
+
+## Smoke Test de Instancias
+
+Executa validação automatizada dos fluxos de instancia:
+
+```bash
+./tests/smoke_instance_flows.sh
+```
+
+Cobertura do teste:
+- `dockermt @nome shell` no host
+- `dockermt @nome container open` no host
+- `dockermt @nome container open` dentro da instancia
+- bloqueio esperado de `dockermt container open` sem `@` dentro da instancia
